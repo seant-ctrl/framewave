@@ -1,0 +1,18 @@
+appId: com.framewave.app
+productName: Framewave
+directories:
+  buildResources: resources
+  output: release
+files:
+  - out/**
+  - package.json
+asarUnpack:
+  - node_modules/ffmpeg-static/**
+  - node_modules/uiohook-napi/**
+win:
+  target:
+    - nsis
+    - portable
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
