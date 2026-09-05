@@ -1,6 +1,6 @@
 import { app, BrowserWindow, protocol, session, globalShortcut, desktopCapturer, ipcMain } from 'electron'
 import { promises as fs, createReadStream } from 'fs'
-import { extname } from 'path'
+import { extname, join, normalize } from 'path'
 import { Readable } from 'stream'
 
 const MIME: Record<string, string> = {
@@ -24,6 +24,19 @@ const MIME: Record<string, string> = {
   '.bmp': 'image/bmp',
   '.json': 'application/json'
 }
+const APP_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json',
+  '.txt': 'text/plain'
+}
 import { createMainWindow, mainWindow, focusMain } from './windows'
 import { registerIpc, capturePick } from './ipc'
 import { getSettings } from './settings'
@@ -35,6 +48,11 @@ protocol.registerSchemesAsPrivileged([
   {
     scheme: 'fwmedia',
     privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: true, corsEnabled: true }
+  },
+  {
+    // Serves the built renderer in production (file:// would block fetch() of wasm/model assets)
+    scheme: 'app',
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true, allowServiceWorkers: true }
   }
 ])
 
@@ -91,6 +109,23 @@ app.whenReady().then(() => {
     headers['Content-Length'] = String(size)
     if (request.method === 'HEAD') return new Response(null, { status: 200, headers })
     return new Response(Readable.toWeb(createReadStream(p)) as ReadableStream, { status: 200, headers })
+  })
+
+  // app://framewave/<file> → out/renderer/<file>
+  const rendererRoot = join(__dirname, '../renderer')
+  protocol.handle('app', async (request) => {
+    const url = new URL(request.url)
+    let rel = decodeURIComponent(url.pathname).replace(/^\/+/, '')
+    if (!rel) rel = 'index.html'
+    const full = normalize(join(rendererRoot, rel))
+    if (!full.startsWith(normalize(rendererRoot))) return new Response('Forbidden', { status: 403 })
+    try {
+      const size = (await fs.stat(full)).size
+      const mime = MIME[extname(full).toLowerCase()] ?? APP_MIME[extname(full).toLowerCase()] ?? 'application/octet-stream'
+      return new Response(Readable.toWeb(createReadStream(full)) as ReadableStream, { status: 200, headers: { 'Content-Type': mime, 'Content-Length': String(size) } })
+    } catch {
+      return new Response('Not found', { status: 404 })
+    }
   })
 
   // Route getDisplayMedia to the source chosen in the UI; enable Windows loopback audio.

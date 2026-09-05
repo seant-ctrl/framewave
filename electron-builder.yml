@@ -1,5 +1,8 @@
 appId: com.framewave.app
 productName: Framewave
+npmRebuild: false
+buildDependenciesFromSource: false
+nodeGypRebuild: false
 directories:
   buildResources: resources
   output: release
@@ -9,6 +12,7 @@ files:
 asarUnpack:
   - node_modules/ffmpeg-static/**
   - node_modules/uiohook-napi/**
+  - node_modules/koffi/**
 win:
   target:
     - nsis

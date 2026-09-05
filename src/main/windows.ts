@@ -10,17 +10,15 @@ let regionWindow: BrowserWindow | null = null
 
 const preload = join(__dirname, '../preload/index.js')
 
-function rendererUrl(page: string): { url?: string; file?: string } {
+function rendererUrl(page: string): string {
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    return { url: `${process.env['ELECTRON_RENDERER_URL']}/${page}` }
+    return `${process.env['ELECTRON_RENDERER_URL']}/${page}`
   }
-  return { file: join(__dirname, `../renderer/${page}`) }
+  return `app://framewave/${page}`
 }
 
 function load(win: BrowserWindow, page: string, hash?: string): void {
-  const target = rendererUrl(page)
-  if (target.url) void win.loadURL(target.url + (hash ? `#${hash}` : ''))
-  else void win.loadFile(target.file!, hash ? { hash } : undefined)
+  void win.loadURL(rendererUrl(page) + (hash ? `#${hash}` : ''))
 }
 
 export function createMainWindow(): BrowserWindow {

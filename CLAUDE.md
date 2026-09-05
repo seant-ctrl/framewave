@@ -21,4 +21,5 @@ Electron (37) + electron-vite + React 19 + TypeScript + Tailwind v4 desktop app:
 - MediaRecorder `start` events are not reliable for sync; use end-alignment (all recorders stop together).
 - `electron-store` v10 is ESM-only and breaks the CJS main bundle; settings use a small JSON store instead.
 - React StrictMode double-invokes effects: `useProject.load` guards against stale loads.
+- Production renderer is served via the custom `app://framewave/` scheme (not `file://`, which blocks `fetch()` of wasm/model files). Native modules (uiohook-napi, koffi) ship N-API prebuilds; electron-builder runs with `npmRebuild: false` because there is no Visual Studio toolchain on this machine.
 - ES module instances are cached by URL; after editing `transcribe.ts` in dev, reload the page before re-importing it from a debug script.
