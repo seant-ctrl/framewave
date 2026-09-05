@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Undo2, Redo2, Download, Scissors, Trash2, Magnet, ZoomIn, ZoomOut, Ratio, Flag } from 'lucide-react'
+import { Undo2, Redo2, Download, Scissors, Trash2, Magnet, ZoomIn, ZoomOut, Ratio, Flag, FilePlus } from 'lucide-react'
 import { useProject, useDuration } from '@/store/projectStore'
 import { usePlayer } from '@/store/playerStore'
 import { useApp } from '@/store/appStore'
@@ -16,6 +16,7 @@ import { Timeline } from './Timeline'
 import { Inspector } from './Inspector'
 import { ExportDialog } from './ExportDialog'
 import { IconButton, Segmented, Spinner } from '../ui/ui'
+import { addMediaToProject, pathsFromDrop } from './mediaImport'
 import type { AspectPreset } from '@shared/types'
 
 export interface EditorContext {
@@ -325,7 +326,15 @@ export function Editor({ projectId }: { projectId: string }): React.JSX.Element 
   const clipCount = placeClips(project.timeline).length
 
   return (
-    <div className="h-full flex min-h-0">
+    <div
+      className="h-full flex min-h-0"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault()
+        const paths = pathsFromDrop(e)
+        if (paths.length) void addMediaToProject(project.id, paths)
+      }}
+    >
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Toolbar */}
         <div className="h-11 shrink-0 flex items-center justify-between px-3 border-b border-line bg-bg-1">
@@ -336,6 +345,7 @@ export function Editor({ projectId }: { projectId: string }): React.JSX.Element 
             <IconButton icon={<Scissors size={15} />} label="Split at playhead (S)" onClick={splitAtPlayhead} />
             <IconButton icon={<Trash2 size={15} />} label={inPoint != null && outPoint != null && selection.kind === 'none' ? 'Delete in/out range (Del)' : 'Delete selection (Del)'} onClick={() => (selection.kind !== 'none' ? deleteSelected() : deleteInOut())} disabled={selection.kind === 'none' && !(inPoint != null && outPoint != null)} />
             <IconButton icon={<Flag size={15} />} label="Add marker (M)" onClick={() => updateTimeline((t) => ({ ...t, markers: [...t.markers, { id: uid('m'), t: time, label: '' }] }))} />
+            <IconButton icon={<FilePlus size={15} />} label="Add media (videos / images)" onClick={() => void addMediaToProject(project.id)} />
             <div className="w-px h-5 bg-line mx-1" />
             <IconButton icon={<Magnet size={15} />} label="Snapping" active={snapping} onClick={() => setSnapping(!snapping)} />
             <IconButton icon={<ZoomOut size={15} />} label="Zoom out timeline (Ctrl -)" onClick={() => setPxPerSec(pxPerSec / 1.3)} />

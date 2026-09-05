@@ -16,6 +16,10 @@ Electron (37) + electron-vite + React 19 + TypeScript + Tailwind v4 desktop app:
 - `src/renderer/src/export/exporter.ts` — WebCodecs export via mediabunny. Frames are read **sequentially** (`FrameFeeder`); random `getSample()` calls are ~100× slower.
 - `src/renderer/src/recorder/recorder.ts` — recording engine (MediaRecorder per track, HUD sync, pause bookkeeping). Tracks are aligned by their common stop time in `finalizeRecording`; events are stored with absolute epoch times and converted there.
 
+## Montage model
+- `Clip.sourceId` selects a `MediaAsset` from `recording.media` (undefined/'screen' = the recording). `Clip.transitionIn` overlaps the previous clip: `placeClips()` in `engine/timeline.ts` computes overlapping placements and `activeClipsAt()` returns current + outgoing clip with progress. Compositor draws transitions in `drawContent`; player keeps one element per source and crossfades gains; exporter uses a `SourcePool` (one sequential `FrameFeeder` per video source, bitmaps for images); mixdown schedules each clip's own audio with fades matching the overlaps.
+- Media ingestion (`projects.ts: ingestMedia`) normalizes everything to H.264 MP4 (or copies images). UI: `panels/ClipPanel.tsx`, drag-reorder + transition badges in `Timeline.tsx`, `mediaImport.ts` for add/drop.
+
 ## Gotchas learned
 - Do not pass width/height constraints to `getDisplayMedia` — Chromium upscales the capture to the max.
 - MediaRecorder `start` events are not reliable for sync; use end-alignment (all recorders stop together).

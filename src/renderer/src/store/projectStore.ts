@@ -59,7 +59,7 @@ interface ProjectState {
   removeCaption(id: string): void
 }
 
-export type PanelId = 'background' | 'screen' | 'cursor' | 'zoom' | 'camera' | 'audio' | 'text' | 'captions' | 'color' | 'keys'
+export type PanelId = 'clip' | 'background' | 'screen' | 'cursor' | 'zoom' | 'camera' | 'audio' | 'text' | 'captions' | 'color' | 'keys'
 
 const MAX_HISTORY = 120
 
@@ -184,6 +184,7 @@ export const useProject = create<ProjectState>((set, get) => {
     setSelection(selection) {
       set({ selection })
       // auto-focus the matching panel
+      if (selection.kind === 'clip') set({ activePanel: 'clip' })
       if (selection.kind === 'zoom') set({ activePanel: 'zoom' })
       if (selection.kind === 'text') set({ activePanel: 'text' })
       if (selection.kind === 'camera') set({ activePanel: 'camera' })

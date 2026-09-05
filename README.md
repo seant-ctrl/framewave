@@ -30,6 +30,12 @@ A powerful, local-first screen recorder and video editor for Windows — in the 
 - **AI captions** with Whisper running locally (WebGPU / WASM), SRT/VTT import & export, karaoke-style word highlight
 - Undo / redo, autosave, keyboard shortcuts
 
+**Montage (multi-clip editing)**
+- Create a project from several videos and photos, or add media to any project (button, drag-and-drop)
+- Reorder clips by dragging, trim, split, per-clip speed, volume and mute, fill/fit framing for mixed aspect ratios
+- Transitions between clips: cross fade, dip to black/white, slides, wipe, zoom, blur — with audio crossfade
+- Background music with loop and fade-out, exported together with each clip's own audio
+
 **Export**
 - MP4 (H.264 / H.265 / AV1), WebM (VP9, alpha-capable), GIF, PNG sequence, MP3
 - GPU-accelerated via WebCodecs — typically many times faster than real time

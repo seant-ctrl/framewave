@@ -160,6 +160,29 @@ export function registerIpc(): void {
     }
     return projects.importVideo(file, (label, p) => send('project:progress', { id: 'import', label, progress: p }))
   })
+  const MEDIA_FILTERS = [
+    { name: 'Media', extensions: ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', 'png', 'jpg', 'jpeg', 'webp', 'bmp'] },
+    { name: 'Video', extensions: ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v'] },
+    { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }
+  ]
+  handle('project:createMontage', async (filePaths?: string[]) => {
+    let files = filePaths
+    if (!files || files.length === 0) {
+      const r = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'], filters: MEDIA_FILTERS, title: 'Choose videos and images for the montage' })
+      if (r.canceled || r.filePaths.length === 0) return null
+      files = r.filePaths
+    }
+    return projects.createMontage(files, (label, p) => send('project:progress', { id: 'import', label, progress: p }))
+  })
+  handle('project:addMedia', async (id: string, filePaths?: string[]) => {
+    let files = filePaths
+    if (!files || files.length === 0) {
+      const r = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'], filters: MEDIA_FILTERS, title: 'Add media to the timeline' })
+      if (r.canceled || r.filePaths.length === 0) return []
+      files = r.filePaths
+    }
+    return projects.addMedia(id, files, (label, p) => send('project:progress', { id, label, progress: p }))
+  })
   handle('project:importAsset', async (id: string, kind: 'audio' | 'image' | 'video') => {
     const filters =
       kind === 'audio'

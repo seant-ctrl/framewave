@@ -1,5 +1,5 @@
 import React from 'react'
-import { Image, Frame, MousePointer2, ZoomIn, Camera, Volume2, Type, Subtitles, Palette, Keyboard } from 'lucide-react'
+import { Image, Frame, MousePointer2, ZoomIn, Camera, Volume2, Type, Subtitles, Palette, Keyboard, Film } from 'lucide-react'
 import { useProject, type PanelId } from '@/store/projectStore'
 import { cn } from '@/lib/utils'
 import { Tip } from '../ui/ui'
@@ -7,8 +7,10 @@ import type { EditorContext } from './Editor'
 import { BackgroundPanel, FramePanel, ColorPanel } from './panels/LookPanels'
 import { CursorPanel, ZoomPanel, CameraPanel, KeysPanel } from './panels/MotionPanels'
 import { AudioPanel, TextPanel, CaptionsPanel } from './panels/ContentPanels'
+import { ClipPanel } from './panels/ClipPanel'
 
 const TABS: Array<{ id: PanelId; icon: React.ReactNode; label: string }> = [
+  { id: 'clip', icon: <Film size={16} />, label: 'Clips & media' },
   { id: 'background', icon: <Image size={16} />, label: 'Background' },
   { id: 'screen', icon: <Frame size={16} />, label: 'Frame & crop' },
   { id: 'zoom', icon: <ZoomIn size={16} />, label: 'Zoom' },
@@ -36,6 +38,7 @@ export function Inspector({ ctx }: { ctx: EditorContext }): React.JSX.Element {
           <span className="text-[13px] font-semibold">{tab.label}</span>
         </div>
         <div className="flex-1 overflow-y-auto">
+          {active === 'clip' && <ClipPanel />}
           {active === 'background' && <BackgroundPanel />}
           {active === 'screen' && <FramePanel />}
           {active === 'zoom' && <ZoomPanel ctx={ctx} />}

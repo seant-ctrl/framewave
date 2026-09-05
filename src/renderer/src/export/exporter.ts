@@ -15,9 +15,9 @@ import {
   type VideoSample
 } from 'mediabunny'
 import type { ExportOptions, ExportProgress, Project, RecordingEvents } from '@shared/types'
-import { Compositor, type FrameSource } from '@/engine/compositor'
+import { Compositor, type FrameSource, type FrameSources } from '@/engine/compositor'
 import { outputSize } from '@/engine/layout'
-import { timelineDuration, timelineToSource } from '@/engine/timeline'
+import { timelineDuration, timelineToSource, activeClipsAt, sourceTimeOf, assetFor } from '@/engine/timeline'
 import { mixdown, mixSourcesFor, openInput } from '@/engine/audio'
 import { ensureImage } from '@/engine/background'
 import { fw, projectMediaUrl } from '@/lib/fw'
@@ -168,6 +168,68 @@ class FrameFeeder {
   }
 }
 
+/** Lazily-opened frame readers per media source (video) or decoded bitmaps (image). */
+class SourcePool {
+  private feeders = new Map<string, Promise<FrameFeeder | null>>()
+  private images = new Map<string, Promise<FrameSource | null>>()
+  constructor(private project: Project) {}
+  async frame(sourceId: string | undefined, sourceMs: number): Promise<FrameSource | null> {
+    const id = sourceId ?? 'screen'
+    const asset = assetFor(this.project, sourceId)
+    if (!asset) return null
+    if (asset.kind === 'image') {
+      if (!this.images.has(id)) {
+        this.images.set(
+          id,
+          (async () => {
+            try {
+              const blob = await fetch(projectMediaUrl(this.project.dir, asset.file)).then((r) => r.blob())
+              const bmp = await createImageBitmap(blob)
+              return { image: bmp, width: bmp.width, height: bmp.height }
+            } catch {
+              return null
+            }
+          })()
+        )
+      }
+      return this.images.get(id)!
+    }
+    if (!this.feeders.has(id)) this.feeders.set(id, FrameFeeder.open(projectMediaUrl(this.project.dir, asset.file), 0))
+    const f = await this.feeders.get(id)!
+    return f ? f.frameAt(sourceMs) : null
+  }
+  async close(): Promise<void> {
+    for (const p of this.feeders.values()) (await p)?.close()
+    for (const p of this.images.values()) {
+      const i = await p
+      if (i && 'close' in i.image) (i.image as ImageBitmap).close()
+    }
+    this.feeders.clear()
+    this.images.clear()
+  }
+}
+
+/** Build the FrameSources for a timeline time using the pool (handles transitions). */
+async function sourcesAt(project: Project, pool: SourcePool, t: number, cameraFeeder: FrameFeeder | null): Promise<FrameSources> {
+  const act = activeClipsAt(project.timeline, t)
+  if (!act) return { screen: null, camera: null }
+  const cur = act.current
+  const isRec = !cur.clip.sourceId || cur.clip.sourceId === 'screen'
+  const s = sourceTimeOf(cur, t)
+  const out: FrameSources = {
+    screen: await pool.frame(cur.clip.sourceId, s),
+    camera: isRec && cameraFeeder ? await cameraFeeder.frameAt(s) : null,
+    sourceId: cur.clip.sourceId,
+    fit: cur.clip.fit
+  }
+  if (act.outgoing && cur.clip.transitionIn) {
+    out.outgoing = await pool.frame(act.outgoing.clip.sourceId, sourceTimeOf(act.outgoing, t))
+    out.outgoingFit = act.outgoing.clip.fit
+    out.transition = { type: cur.clip.transitionIn.type, progress: act.progress }
+  }
+  return out
+}
+
 export async function exportProject(
   project: Project,
   events: RecordingEvents | null,
@@ -206,7 +268,7 @@ export async function exportProject(
 
   // Sources
   if (project.render.background.type === 'image') await ensureImage(project.render.background.src)
-  const screenFeeder = rec.screen ? await FrameFeeder.open(projectMediaUrl(project.dir, rec.screen.file), 0) : null
+  const pool = new SourcePool(project)
   const cameraFeeder = rec.camera && project.render.camera.enabled ? await FrameFeeder.open(projectMediaUrl(project.dir, rec.camera.file), rec.camera.offsetMs ?? 0) : null
 
   const compositor = new Compositor(project, events)
@@ -225,7 +287,7 @@ export async function exportProject(
   let fileKey: string | null = null
   let output: Output | null = null
   const cleanup = async (): Promise<void> => {
-    screenFeeder?.close()
+    await pool.close()
     cameraFeeder?.close()
     if (fileKey) await fw.file.close(fileKey).catch(() => {})
   }
@@ -238,10 +300,7 @@ export async function exportProject(
       for (let i = 0; i < totalFrames; i++) {
         check()
         const t = range.start + i * frameDur
-        const s = timelineToSource(project.timeline, t)
-        const screen = screenFeeder ? await screenFeeder.frameAt(s) : null
-        const camera = cameraFeeder ? await cameraFeeder.frameAt(s) : null
-        compositor.renderFrame(ctx as unknown as CanvasRenderingContext2D, t, { screen, camera })
+        compositor.renderFrame(ctx as unknown as CanvasRenderingContext2D, t, await sourcesAt(project, pool, t, cameraFeeder))
         const blob = await canvas.convertToBlob({ type: 'image/png' })
         const key = await fw.file.open(`${base}_${String(i + 1).padStart(5, '0')}.png`)
         await fw.file.write(key, new Uint8Array(await blob.arrayBuffer()), 0)
@@ -304,12 +363,10 @@ export async function exportProject(
     for (let i = 0; i < totalFrames; i++) {
       check()
       const t = range.start + i * frameDur
-      const s = timelineToSource(project.timeline, t)
       const pa = performance.now()
-      const screen = screenFeeder ? await screenFeeder.frameAt(s) : null
-      const camera = cameraFeeder ? await cameraFeeder.frameAt(s) : null
+      const srcs = await sourcesAt(project, pool, t, cameraFeeder)
       const pb = performance.now()
-      compositor.renderFrame(ctx as unknown as CanvasRenderingContext2D, t, { screen, camera })
+      compositor.renderFrame(ctx as unknown as CanvasRenderingContext2D, t, srcs)
       const pc = performance.now()
       await videoSource.add((i * frameDur) / 1000, frameDur / 1000)
       const pd = performance.now()
@@ -331,7 +388,7 @@ export async function exportProject(
     await output.finalize()
     await fw.file.close(fileKey)
     fileKey = null
-    screenFeeder?.close()
+    await pool.close()
     cameraFeeder?.close()
 
     // ── Post-processing ──────────────────────────────────────────────────
@@ -414,27 +471,24 @@ async function exportAudioOnly(project: Project, options: ExportOptions, range: 
   return options.outPath
 }
 
-/** Render a single frame to a JPEG data URL (thumbnails). */
+/** Render a single frame to a JPEG blob (thumbnails). */
 export async function renderThumbnail(project: Project, events: RecordingEvents | null, t: number, width = 640): Promise<Blob | null> {
   const rec = project.recording
-  if (!rec.screen) return null
+  if (!rec.screen && !(rec.media && rec.media.length)) return null
   const size = outputSize(project.render, rec.width || 1920, rec.height || 1080, 1080)
   const h = Math.round((width * size.height) / size.width)
-  const feeder = await FrameFeeder.open(projectMediaUrl(project.dir, rec.screen.file), 0)
-  if (!feeder) return null
+  const pool = new SourcePool(project)
   const camFeeder = rec.camera && project.render.camera.enabled ? await FrameFeeder.open(projectMediaUrl(project.dir, rec.camera.file), rec.camera.offsetMs ?? 0) : null
   try {
     if (project.render.background.type === 'image') await ensureImage(project.render.background.src)
     const canvas = new OffscreenCanvas(width, h)
     const ctx = canvas.getContext('2d')!
     const comp = new Compositor(project, events)
-    const s = timelineToSource(project.timeline, t)
-    const screen = await feeder.frameAt(s)
-    const camera = camFeeder ? await camFeeder.frameAt(s) : null
-    comp.renderFrame(ctx as unknown as CanvasRenderingContext2D, t, { screen, camera })
+    comp.renderFrame(ctx as unknown as CanvasRenderingContext2D, t, await sourcesAt(project, pool, t, camFeeder))
     return await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 })
   } finally {
-    feeder.close()
+    await pool.close()
     camFeeder?.close()
   }
 }
+void timelineToSource

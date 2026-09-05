@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Volume2, VolumeX, Video, ZoomIn, Camera, Type, Subtitles, Music, Mic, Speaker, Flag } from 'lucide-react'
+import { Volume2, VolumeX, Video, ZoomIn, Camera, Type, Subtitles, Music, Mic, Speaker, Flag, FilePlus, Image as ImageIcon } from 'lucide-react'
 import type { EditorContext } from './Editor'
 import { useProject, type Selection } from '@/store/projectStore'
 import { usePlayer } from '@/store/playerStore'
-import { placeClips, timelineDuration, snapPoints, trimClip, splitAt, removeClip, setClipSpeed } from '@/engine/timeline'
+import { placeClips, timelineDuration, snapPoints, trimClip, splitAt, removeClip, setClipSpeed, moveClip, assetFor, updateClip, type ClipPlacement } from '@/engine/timeline'
+import { addMediaToProject } from './mediaImport'
+import { TRANSITIONS } from './panels/ClipPanel'
 import { cn, formatTime, clamp, uid } from '@/lib/utils'
 import type { ZoomSegment, CameraSegment, TextOverlay, CaptionSegment } from '@shared/types'
 
@@ -38,6 +40,8 @@ export function Timeline({ ctx, snapping }: { ctx: EditorContext; snapping: bool
   const scrollRef = useRef<HTMLDivElement>(null)
   const [menu, setMenu] = useState<{ x: number; y: number; items: Array<{ label: string; onClick: () => void; danger?: boolean }> } | null>(null)
   const [viewW, setViewW] = useState(800)
+  const [dragClip, setDragClip] = useState<{ id: string; dx: number; toIndex: number } | null>(null)
+  const dragClipRef = useRef<{ id: string; dx: number; toIndex: number } | null>(null)
 
   const tl = project.timeline
   const duration = timelineDuration(tl)
@@ -250,43 +254,96 @@ export function Timeline({ ctx, snapping }: { ctx: EditorContext; snapping: bool
 
   const trackRows: Array<{ key: string; icon: React.ReactNode; label: string; h: number; right?: React.ReactNode; body: React.ReactNode }> = []
 
-  // Video track
+  // Video track (clips are draggable to reorder; transitions overlap the previous clip)
+  const startClipDrag = (e: React.PointerEvent, p: ClipPlacement): void => {
+    if (e.button !== 0) return
+    const x0 = e.clientX
+    let moved = false
+    const move = (ev: PointerEvent): void => {
+      const dx = ev.clientX - x0
+      if (!moved && Math.abs(dx) < 6) return
+      moved = true
+      const tPointer = toT(contentX(ev.clientX))
+      let idx = places.length
+      for (let i = 0; i < places.length; i++) {
+        const mid = (places[i].start + places[i].end) / 2
+        if (tPointer < mid) {
+          idx = i
+          break
+        }
+      }
+      const d = { id: p.clip.id, dx, toIndex: idx }
+      dragClipRef.current = d
+      setDragClip(d)
+    }
+    const up = (): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      const d = dragClipRef.current
+      dragClipRef.current = null
+      setDragClip(null)
+      if (d && moved) {
+        let to = d.toIndex
+        if (to > p.index) to -= 1
+        if (to !== p.index) updateTimeline((tl2) => moveClip(tl2, p.clip.id, to))
+      }
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+  const dropX = dragClip ? (dragClip.toIndex < places.length ? toX(places[dragClip.toIndex].start) : toX(places[places.length - 1]?.end ?? 0)) : null
+
   trackRows.push({
     key: 'video',
     icon: <Video size={13} />,
     label: 'Video',
     h: 48,
+    right: (
+      <button className="text-fg-3 hover:text-fg" title="Add media (videos / images)" onClick={() => void addMediaToProject(project.id)}>
+        <FilePlus size={13} />
+      </button>
+    ),
     body: (
       <>
         {places.map((p, i) => {
           const sel = isSel('clip', p.clip.id)
+          const asset = assetFor(project, p.clip.sourceId)
+          const isImage = asset?.kind === 'image'
+          const label = asset?.name ?? (p.clip.sourceId ? 'Media' : `Clip ${i + 1}`)
+          const dragging = dragClip?.id === p.clip.id
           return (
             <div
               key={p.clip.id}
-              className={cn('absolute top-1.5 bottom-1.5 rounded-md overflow-hidden group select-none', sel ? 'ring-2 ring-accent' : 'ring-1 ring-white/10')}
-              style={{ left: toX(p.start), width: Math.max(4, toX(p.end) - toX(p.start)), background: 'linear-gradient(180deg,#2a2d4a,#22243c)' }}
+              className={cn('absolute top-1.5 bottom-1.5 rounded-md overflow-hidden group select-none cursor-grab active:cursor-grabbing', sel ? 'ring-2 ring-accent' : 'ring-1 ring-white/10', dragging && 'z-20 opacity-90')}
+              style={{ left: toX(p.start) + (dragging ? dragClip!.dx : 0), width: Math.max(4, toX(p.end) - toX(p.start)), background: isImage ? 'linear-gradient(180deg,#3b2f52,#2b2340)' : 'linear-gradient(180deg,#2a2d4a,#22243c)' }}
               onPointerDown={(e) => {
                 if (e.button === 0) {
                   setSelection({ kind: 'clip', id: p.clip.id })
                   e.stopPropagation()
+                  startClipDrag(e, p)
                 }
               }}
               onContextMenu={(e) =>
                 openMenu(e, [
                   { label: 'Split at playhead', onClick: () => updateTimeline((t) => splitAt(t, time)) },
-                  { label: 'Speed 0.5×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 0.5)) },
-                  { label: 'Speed 1×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 1)) },
-                  { label: 'Speed 1.5×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 1.5)) },
-                  { label: 'Speed 2×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 2)) },
-                  { label: 'Speed 4×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 4)) },
+                  ...(isImage ? [] : [
+                    { label: 'Speed 0.5×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 0.5)) },
+                    { label: 'Speed 1×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 1)) },
+                    { label: 'Speed 1.5×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 1.5)) },
+                    { label: 'Speed 2×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 2)) }
+                  ]),
+                  { label: p.clip.muted ? 'Unmute clip audio' : 'Mute clip audio', onClick: () => updateTimeline((t) => updateClip(t, p.clip.id, { muted: !p.clip.muted })) },
                   ...(places.length > 1 ? [{ label: 'Delete clip', danger: true, onClick: () => updateTimeline((t) => removeClip(t, p.clip.id)) }] : [])
                 ])
               }
             >
               <div className="absolute inset-0 opacity-30" style={{ backgroundImage: 'repeating-linear-gradient(90deg, rgba(255,255,255,0.08) 0 1px, transparent 1px 24px)' }} />
+              {p.overlapIn > 0 && <div className="absolute left-0 top-0 bottom-0 bg-white/10 pointer-events-none" style={{ width: toX(p.overlapIn) }} />}
               <div className="absolute left-2 top-1 text-[11px] font-medium truncate right-2 flex items-center gap-1.5">
-                <span className="text-fg-2">Clip {i + 1}</span>
+                {isImage ? <ImageIcon size={11} className="text-fg-3 shrink-0" /> : null}
+                <span className="text-fg-2 truncate">{label}</span>
                 {p.clip.speed !== 1 && <span className="px-1 rounded bg-accent/30 text-accent-2 text-[10px]">{p.clip.speed}×</span>}
+                {p.clip.muted && <VolumeX size={10} className="text-fg-3" />}
                 <span className="text-fg-3 font-mono text-[10px] ml-auto">{formatTime(p.end - p.start)}</span>
               </div>
               <div className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-accent/60" onPointerDown={(e) => dragClipEdge(e, p.clip.id, 'start')} />
@@ -294,6 +351,31 @@ export function Timeline({ ctx, snapping }: { ctx: EditorContext; snapping: bool
             </div>
           )
         })}
+        {places.slice(1).map((p) => (
+          <button
+            key={'tr-' + p.clip.id}
+            className={cn('absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-5 h-5 rounded-full grid place-items-center z-10 text-[10px] leading-none', p.clip.transitionIn ? 'bg-accent text-white shadow' : 'bg-bg-3 text-fg-3 border border-line-2 hover:text-fg')}
+            style={{ left: toX(p.start + p.overlapIn / 2) }}
+            title={p.clip.transitionIn ? `${TRANSITIONS.find((t) => t.value === p.clip.transitionIn!.type)?.label} · ${p.clip.transitionIn.durationMs}ms` : 'Add a transition'}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              setSelection({ kind: 'clip', id: p.clip.id })
+            }}
+            onContextMenu={(e) =>
+              openMenu(
+                e,
+                TRANSITIONS.map((t) => ({
+                  label: t.label,
+                  onClick: () => updateTimeline((tl2) => updateClip(tl2, p.clip.id, { transitionIn: t.value === 'cut' ? undefined : { type: t.value, durationMs: p.clip.transitionIn?.durationMs ?? 500 } }))
+                }))
+              )
+            }
+          >
+            ◐
+          </button>
+        ))}
+        {dropX != null && <div className="absolute top-0 bottom-0 w-[3px] bg-accent-2 z-30 pointer-events-none rounded" style={{ left: dropX - 1 }} />}
       </>
     )
   })

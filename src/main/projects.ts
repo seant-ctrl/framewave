@@ -355,6 +355,123 @@ export async function importVideo(filePath: string, onProgress?: (label: string,
   return project
 }
 
+// ── Montage: multiple media sources ─────────────────────────────────────────
+
+const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'])
+
+/** Normalize a media file (video or image) into the project dir and return its asset. */
+export async function ingestMedia(id: string, filePath: string, onProgress?: (label: string, p: number) => void): Promise<MediaAsset> {
+  const dir = projectDir(id)
+  await ensureDir(dir)
+  const ext = extname(filePath).toLowerCase()
+  const base = basename(filePath, ext).replace(/[<>:"/\\|?*\x00-\x1f]/g, '').slice(0, 60) || 'media'
+  const assetId = `m-${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`
+  if (IMAGE_EXT.has(ext)) {
+    const out = `${assetId}-${base}${ext === '.jpeg' ? '.jpg' : ext}`
+    await fs.copyFile(filePath, join(dir, out))
+    let width = 1920
+    let height = 1080
+    try {
+      const info = await ffmpeg.probe(filePath)
+      if (info.width) width = info.width
+      if (info.height) height = info.height
+    } catch {
+      /* keep defaults */
+    }
+    return { id: assetId, kind: 'image', name: basename(filePath), file: out, width, height, durationMs: 4000, hasAudio: false }
+  }
+  const info = await ffmpeg.probe(filePath)
+  if (!info.hasVideo) throw new Error(`${basename(filePath)} has no video stream`)
+  const isMp4 = ['.mp4', '.m4v', '.mov'].includes(ext)
+  let out: string
+  if (info.codec === 'h264' && ext === '.mp4') {
+    out = `${assetId}-${base}.mp4`
+    await fs.copyFile(filePath, join(dir, out))
+  } else if (info.codec === 'h264' && isMp4) {
+    out = `${assetId}-${base}.mp4`
+    await ffmpeg.run(['-i', filePath, '-c:v', 'copy', ...(info.hasAudio ? ['-c:a', 'aac', '-b:a', '192k'] : ['-an']), '-movflags', '+faststart', join(dir, out)], {
+      durationMs: info.durationMs,
+      onProgress: (p) => onProgress?.(`Importing ${basename(filePath)}`, p.progress)
+    })
+  } else {
+    out = `${assetId}-${base}.mp4`
+    await ffmpeg.run(
+      ['-i', filePath, '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', ...(info.hasAudio ? ['-c:a', 'aac', '-b:a', '192k'] : ['-an']), '-movflags', '+faststart', join(dir, out)],
+      { durationMs: info.durationMs, onProgress: (p) => onProgress?.(`Converting ${basename(filePath)}`, p.progress) }
+    )
+  }
+  const fi = await ffmpeg.probe(join(dir, out))
+  return { id: assetId, kind: 'video', name: basename(filePath), file: out, width: fi.width, height: fi.height, durationMs: fi.durationMs, hasAudio: fi.hasAudio, codec: fi.codec }
+}
+
+/** Create a montage project from several media files. */
+export async function createMontage(files: string[], onProgress?: (label: string, p: number) => void): Promise<Project> {
+  if (files.length === 0) throw new Error('No files')
+  const id = newProjectId()
+  const dir = projectDir(id)
+  await ensureDir(dir)
+  const media: MediaAsset[] = []
+  for (let i = 0; i < files.length; i++) {
+    media.push(await ingestMedia(id, files[i], (label, p) => onProgress?.(`${label} (${i + 1}/${files.length})`, p)))
+  }
+  const first = media.find((m) => m.kind === 'video') ?? media[0]
+  const recording: RecordingMeta = {
+    mode: 'montage',
+    fps: 30,
+    durationMs: 0,
+    width: first.width ?? 1920,
+    height: first.height ?? 1080,
+    media,
+    eventsOffsetMs: 0,
+    scaleFactor: 1,
+    recordedAt: Date.now()
+  }
+  const now = Date.now()
+  const timeline = DEFAULT_TIMELINE(0)
+  timeline.clips = media.map((m, i) => ({
+    id: `clip-${i + 1}`,
+    sourceId: m.id,
+    sourceStart: 0,
+    sourceEnd: m.durationMs ?? 4000,
+    speed: 1,
+    fit: 'cover' as const,
+    transitionIn: i > 0 ? { type: 'fade' as const, durationMs: 500 } : undefined
+  }))
+  recording.durationMs = timeline.clips.reduce((a, c) => a + (c.sourceEnd - c.sourceStart), 0)
+  const project: Project = {
+    id,
+    name: safeName(basename(files[0], extname(files[0]))) + (files.length > 1 ? ` +${files.length - 1}` : ''),
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
+    dir,
+    recording,
+    timeline,
+    render: {
+      ...DEFAULT_RENDER,
+      ...getSettings().defaultRender,
+      aspect: '16:9',
+      padding: 0,
+      cornerRadius: 0,
+      shadow: { ...DEFAULT_RENDER.shadow, enabled: false },
+      background: { type: 'color', color: '#000000' },
+      cursor: { ...DEFAULT_RENDER.cursor, mode: 'hidden' },
+      zoom: { ...DEFAULT_RENDER.zoom, autoEnabled: false },
+      keystrokes: { ...DEFAULT_RENDER.keystrokes, enabled: false },
+      camera: { ...DEFAULT_RENDER.camera, enabled: false }
+    }
+  }
+  await saveProject(project)
+  return project
+}
+
+/** Add media files to an existing project; returns the new assets (project.json is NOT modified). */
+export async function addMedia(id: string, files: string[], onProgress?: (label: string, p: number) => void): Promise<MediaAsset[]> {
+  const out: MediaAsset[] = []
+  for (let i = 0; i < files.length; i++) out.push(await ingestMedia(id, files[i], (label, p) => onProgress?.(`${label} (${i + 1}/${files.length})`, p)))
+  return out
+}
+
 /** Copy an arbitrary file (music, background image) into the project. */
 export async function importAsset(id: string, filePath: string): Promise<string> {
   const dir = projectDir(id)

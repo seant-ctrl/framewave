@@ -1,6 +1,6 @@
 import { Input, ALL_FORMATS, UrlSource, BlobSource, AudioBufferSink, type InputAudioTrack } from 'mediabunny'
 import type { AudioTrackSettings, Project, Timeline } from '@shared/types'
-import { placeClips } from './timeline'
+import { placeClips, assetFor } from './timeline'
 import { projectMediaUrl } from '@/lib/fw'
 
 export async function openInput(url: string): Promise<Input> {
@@ -157,6 +157,7 @@ export async function mixdown(
         // Recording-clock tracks: follow clips (speed & cuts)
         for (const p of places) {
           if (p.end <= range.start || p.start >= range.end) continue
+          if (p.clip.sourceId && p.clip.sourceId !== 'screen') continue
           const speed = p.clip.speed || 1
           // portion of clip within the range
           const tlA = Math.max(p.start, range.start)
@@ -195,6 +196,64 @@ export async function mixdown(
       onProgress?.(done / sources.length)
     }
   }
+  // ── Each clip's own source audio (montage media + the recording's screen audio) ──
+  for (const p of places) {
+    if (p.end <= range.start || p.start >= range.end) continue
+    const c = p.clip
+    const asset = assetFor(project, c.sourceId)
+    if (!asset || asset.kind === 'image' || !asset.hasAudio || c.muted) continue
+    const isRec = !c.sourceId || c.sourceId === 'screen'
+    const sysGain = isRec ? (timeline.audio.system.muted ? 0 : timeline.audio.system.volume) : 1
+    const gain = (c.volume ?? 1) * sysGain
+    if (gain <= 0) continue
+    let input: Input | null = null
+    try {
+      input = await openInput(projectMediaUrl(project.dir, asset.file))
+      const track = await input.getPrimaryAudioTrack()
+      if (!track || !(await track.canDecode())) continue
+      const trackDur = await track.computeDuration()
+      const sink = new AudioBufferSink(track)
+      const speed = c.speed || 1
+      const clipGain = ctx.createGain()
+      clipGain.connect(ctx.destination)
+      // Crossfade with transitions: fade in over overlapIn, fade out over the next clip's overlap
+      const next = places[p.index + 1]
+      const fadeOutMs = next ? next.overlapIn : 0
+      const fadeInMs = p.overlapIn
+      const startSec = Math.max(0, (p.start - range.start) / 1000)
+      const endSec = Math.min(lengthSec, (p.end - range.start) / 1000)
+      clipGain.gain.setValueAtTime(fadeInMs > 0 ? 0 : gain, Math.max(0, startSec))
+      if (fadeInMs > 0) clipGain.gain.linearRampToValueAtTime(gain, Math.min(endSec, startSec + fadeInMs / 1000))
+      if (fadeOutMs > 0 && endSec - fadeOutMs / 1000 > startSec) {
+        clipGain.gain.setValueAtTime(gain, endSec - fadeOutMs / 1000)
+        clipGain.gain.linearRampToValueAtTime(0, endSec)
+      }
+      const tlA = Math.max(p.start, range.start)
+      const tlB = Math.min(p.end, range.end)
+      const srcA = (c.sourceStart + (tlA - p.start) * speed) / 1000
+      const srcB = (c.sourceStart + (tlB - p.start) * speed) / 1000
+      if (srcB <= 0 || srcA >= trackDur) continue
+      for await (const { buffer, timestamp } of sink.buffers(Math.max(0, srcA), Math.min(trackDur, srcB))) {
+        const node = ctx.createBufferSource()
+        node.buffer = buffer
+        node.playbackRate.value = speed
+        node.connect(clipGain)
+        const tl = p.start + (timestamp * 1000 - c.sourceStart) / speed
+        const when = (tl - range.start) / 1000
+        const chunkDurTl = buffer.duration / speed
+        if (when + chunkDurTl <= 0) continue
+        if (when < 0) node.start(0, -when * speed)
+        else node.start(when)
+        if (when + chunkDurTl > endSec) node.stop(Math.max(0, endSec))
+        any = true
+      }
+    } catch (e) {
+      console.warn('[mixdown] clip audio failed', e)
+    } finally {
+      input?.dispose?.()
+    }
+  }
+  onProgress?.(1)
   if (!any) return null
   return ctx.startRendering()
 }
@@ -205,7 +264,7 @@ export function mixSourcesFor(project: Project): MixSource[] {
   const out: MixSource[] = []
   if (r.mic) out.push({ name: 'mic', url: projectMediaUrl(project.dir, r.mic.file), settings: a.mic, offsetMs: r.mic.offsetMs ?? 0, basis: 'source' })
   if (r.system) out.push({ name: 'system', url: projectMediaUrl(project.dir, r.system.file), settings: a.system, offsetMs: r.system.offsetMs ?? 0, basis: 'source' })
-  if (r.screen?.hasAudio) out.push({ name: 'screen', url: projectMediaUrl(project.dir, r.screen.file), settings: a.system, offsetMs: 0, basis: 'source' })
+  // (the recording's own screen audio and montage media audio are mixed per clip inside mixdown)
   if (r.camera?.hasAudio && !a.camera.muted) out.push({ name: 'camera', url: projectMediaUrl(project.dir, r.camera.file), settings: a.camera, offsetMs: r.camera.offsetMs ?? 0, basis: 'source' })
   if (a.music) out.push({ name: 'music', url: projectMediaUrl(project.dir, a.music.file), settings: { volume: a.music.volume, muted: a.music.muted, gate: null, fadeIn: 0, fadeOut: 1500 }, offsetMs: a.music.offset, basis: 'timeline', loop: a.music.loop })
   return out

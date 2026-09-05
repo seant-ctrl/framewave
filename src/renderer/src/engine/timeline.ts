@@ -1,4 +1,4 @@
-import type { Clip, Timeline } from '@shared/types'
+import type { Clip, Timeline, Project, MediaAsset } from '@shared/types'
 import { uid } from '@/lib/utils'
 
 /** Duration of a clip on the timeline (accounting for speed). */
@@ -6,8 +6,11 @@ export function clipDuration(c: Clip): number {
   return Math.max(0, (c.sourceEnd - c.sourceStart) / (c.speed || 1))
 }
 
-export function timelineDuration(tl: Timeline): number {
-  return tl.clips.reduce((a, c) => a + clipDuration(c), 0)
+/** Overlap (ms) a clip's incoming transition takes from the previous clip. */
+export function overlapOf(prev: Clip | undefined, c: Clip): number {
+  if (!prev || !c.transitionIn || c.transitionIn.type === 'cut') return 0
+  const max = Math.min(clipDuration(prev), clipDuration(c)) * 0.5
+  return Math.max(0, Math.min(c.transitionIn.durationMs, max))
 }
 
 export interface ClipPlacement {
@@ -15,22 +18,36 @@ export interface ClipPlacement {
   index: number
   start: number // timeline start
   end: number // timeline end
+  /** Length of the incoming transition overlap at the start of this clip. */
+  overlapIn: number
 }
 
+/** Lay clips out on the timeline. Transitions overlap the end of the previous clip. */
 export function placeClips(tl: Timeline): ClipPlacement[] {
   let t = 0
-  return tl.clips.map((clip, index) => {
-    const start = t
-    t += clipDuration(clip)
-    return { clip, index, start, end: t }
+  const out: ClipPlacement[] = []
+  tl.clips.forEach((clip, index) => {
+    const ov = overlapOf(tl.clips[index - 1], clip)
+    const start = Math.max(0, t - ov)
+    const end = start + clipDuration(clip)
+    out.push({ clip, index, start, end, overlapIn: ov })
+    t = end
   })
+  return out
 }
 
-/** Find which clip a timeline time falls in. */
+export function timelineDuration(tl: Timeline): number {
+  const p = placeClips(tl)
+  return p.length ? p[p.length - 1].end : 0
+}
+
+/** Find the clip that "owns" timeline time t (the incoming clip during a transition). */
 export function clipAt(tl: Timeline, t: number): ClipPlacement | null {
   const places = placeClips(tl)
   if (places.length === 0) return null
-  for (const p of places) {
+  // Later clips win inside overlaps
+  for (let i = places.length - 1; i >= 0; i--) {
+    const p = places[i]
     if (t >= p.start && t < p.end) return p
   }
   const last = places[places.length - 1]
@@ -38,17 +55,43 @@ export function clipAt(tl: Timeline, t: number): ClipPlacement | null {
   return places[0]
 }
 
-/** Map timeline time → source (media) time. */
-export function timelineToSource(tl: Timeline, t: number): number {
-  const p = clipAt(tl, t)
-  if (!p) return t
+export interface ActiveClips {
+  current: ClipPlacement
+  /** Outgoing clip while a transition is running */
+  outgoing: ClipPlacement | null
+  /** 0..1 progress of the transition (1 when no transition) */
+  progress: number
+}
+
+/** Current clip plus the outgoing one (with progress) when t lies inside a transition overlap. */
+export function activeClipsAt(tl: Timeline, t: number): ActiveClips | null {
+  const cur = clipAt(tl, t)
+  if (!cur) return null
+  if (cur.overlapIn > 0 && t < cur.start + cur.overlapIn && cur.index > 0) {
+    const places = placeClips(tl)
+    const prev = places[cur.index - 1]
+    return { current: cur, outgoing: prev, progress: Math.min(1, Math.max(0, (t - cur.start) / cur.overlapIn)) }
+  }
+  return { current: cur, outgoing: null, progress: 1 }
+}
+
+/** Source time of a placement at timeline time t (clamped to the clip). */
+export function sourceTimeOf(p: ClipPlacement, t: number): number {
   const local = Math.min(Math.max(0, t - p.start), p.end - p.start)
   return p.clip.sourceStart + local * (p.clip.speed || 1)
 }
 
-/** Map source time → timeline time (first match). */
-export function sourceToTimeline(tl: Timeline, s: number): number | null {
+/** Map timeline time → source (media) time of the owning clip. */
+export function timelineToSource(tl: Timeline, t: number): number {
+  const p = clipAt(tl, t)
+  if (!p) return t
+  return sourceTimeOf(p, t)
+}
+
+/** Map source time → timeline time (first clip of the given source that contains it). */
+export function sourceToTimeline(tl: Timeline, s: number, sourceId?: string): number | null {
   for (const p of placeClips(tl)) {
+    if ((p.clip.sourceId ?? undefined) !== (sourceId ?? undefined)) continue
     if (s >= p.clip.sourceStart && s <= p.clip.sourceEnd) {
       return p.start + (s - p.clip.sourceStart) / (p.clip.speed || 1)
     }
@@ -56,13 +99,19 @@ export function sourceToTimeline(tl: Timeline, s: number): number | null {
   return null
 }
 
+/** Resolve the media asset a clip plays. */
+export function assetFor(project: Project, sourceId: string | undefined): MediaAsset | undefined {
+  if (!sourceId || sourceId === 'screen') return project.recording.screen
+  return project.recording.media?.find((m) => m.id === sourceId)
+}
+
 /** Split the clip at timeline time t. Returns a new timeline. */
 export function splitAt(tl: Timeline, t: number): Timeline {
   const p = clipAt(tl, t)
-  if (!p || t <= p.start + 1 || t >= p.end - 1) return tl
-  const s = timelineToSource(tl, t)
+  if (!p || t <= p.start + p.overlapIn + 1 || t >= p.end - 1) return tl
+  const s = sourceTimeOf(p, t)
   const a: Clip = { ...p.clip, id: uid('clip'), sourceEnd: s }
-  const b: Clip = { ...p.clip, id: uid('clip'), sourceStart: s }
+  const b: Clip = { ...p.clip, id: uid('clip'), sourceStart: s, transitionIn: undefined }
   const clips = [...tl.clips]
   clips.splice(p.index, 1, a, b)
   return { ...tl, clips }
@@ -93,9 +142,12 @@ export function deleteRange(tl: Timeline, a: number, b: number): Timeline {
 }
 
 export function removeClip(tl: Timeline, clipId: string): Timeline {
-  const p = placeClips(tl).find((x) => x.clip.id === clipId)
-  if (!p) return tl
-  return deleteRange(tl, p.start, p.end)
+  const idx = tl.clips.findIndex((c) => c.id === clipId)
+  if (idx < 0) return tl
+  const clips = tl.clips.filter((c) => c.id !== clipId)
+  // The clip that now follows loses its transition target if it was first
+  if (idx === 0 && clips[0]) clips[0] = { ...clips[0], transitionIn: undefined }
+  return clampSegments({ ...tl, clips })
 }
 
 /** Trim a clip edge. `edge` = which side; `t` = new timeline position. */
@@ -123,12 +175,36 @@ export function setClipSpeed(tl: Timeline, clipId: string, speed: number): Timel
   return { ...tl, clips: tl.clips.map((c) => (c.id === clipId ? { ...c, speed } : c)) }
 }
 
+export function updateClip(tl: Timeline, clipId: string, patch: Partial<Clip>): Timeline {
+  return { ...tl, clips: tl.clips.map((c) => (c.id === clipId ? { ...c, ...patch } : c)) }
+}
+
+/** Move a clip to a new index. */
+export function moveClip(tl: Timeline, clipId: string, toIndex: number): Timeline {
+  const from = tl.clips.findIndex((c) => c.id === clipId)
+  if (from < 0) return tl
+  const clips = [...tl.clips]
+  const [c] = clips.splice(from, 1)
+  const idx = Math.max(0, Math.min(clips.length, toIndex))
+  clips.splice(idx, 0, c)
+  if (clips[0]?.transitionIn) clips[0] = { ...clips[0], transitionIn: undefined }
+  return { ...tl, clips }
+}
+
+export function duplicateClip(tl: Timeline, clipId: string): Timeline {
+  const idx = tl.clips.findIndex((c) => c.id === clipId)
+  if (idx < 0) return tl
+  const clips = [...tl.clips]
+  clips.splice(idx + 1, 0, { ...tl.clips[idx], id: uid('clip') })
+  return { ...tl, clips }
+}
+
 /** Merge adjacent clips that are continuous in source time & same speed. */
 export function mergeContinuous(tl: Timeline): Timeline {
   const out: Clip[] = []
   for (const c of tl.clips) {
     const prev = out[out.length - 1]
-    if (prev && Math.abs(prev.sourceEnd - c.sourceStart) < 1 && prev.speed === c.speed) {
+    if (prev && prev.sourceId === c.sourceId && Math.abs(prev.sourceEnd - c.sourceStart) < 1 && prev.speed === c.speed && !c.transitionIn) {
       out[out.length - 1] = { ...prev, sourceEnd: c.sourceEnd }
     } else out.push({ ...c })
   }

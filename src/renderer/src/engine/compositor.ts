@@ -1,4 +1,4 @@
-import type { Project, RecordingEvents, RenderSettings, Timeline, Vec2, CameraSegment, TextOverlay, KeyEvent, Rect } from '@shared/types'
+import type { Project, RecordingEvents, RenderSettings, Timeline, Vec2, CameraSegment, TextOverlay, KeyEvent, Rect, TransitionType } from '@shared/types'
 import { computeLayout, fullToCropped, roundRectPath, squirclePath, type Layout } from './layout'
 import { drawBackground } from './background'
 import { ZoomSolver, type ZoomState } from './zoom'
@@ -18,6 +18,13 @@ export interface FrameSource {
 export interface FrameSources {
   screen: FrameSource | null
   camera: FrameSource | null
+  /** Outgoing clip frame while a transition is running */
+  outgoing?: FrameSource | null
+  transition?: { type: TransitionType; progress: number }
+  /** Current clip's source id (undefined/'screen' = the recording) and fit mode */
+  sourceId?: string
+  fit?: 'contain' | 'cover'
+  outgoingFit?: 'contain' | 'cover'
 }
 
 export interface RenderOptions {
@@ -202,11 +209,12 @@ export class Compositor {
       ctx.translate(tr.px, tr.py)
       ctx.scale(tr.s, tr.s)
       ctx.translate(-tr.px, -tr.py)
-      this.drawScreenFrame(ctx, layout, sources.screen, opts)
+      this.drawScreenFrame(ctx, layout, sources, opts)
       ctx.restore()
 
-      // 3. Cursor + click effects (drawn in output space so sizes stay crisp)
-      if (r.cursor.mode !== 'hidden' && this.events) {
+      // 3. Cursor + click effects (only for the recording's own footage)
+      const isRecordingSource = !sources.sourceId || sources.sourceId === 'screen'
+      if (r.cursor.mode !== 'hidden' && this.events && isRecordingSource) {
         this.drawCursorLayer(ctx, layout, tr, t, s, opts)
       }
     }
@@ -244,11 +252,153 @@ export class Compositor {
     return `brightness(${1 + c.brightness}) contrast(${1 + c.contrast}) saturate(${1 + c.saturation})`
   }
 
-  private drawScreenFrame(ctx: Ctx, layout: Layout, screen: FrameSource | null, opts: RenderOptions): void {
+  /** Draw a source into the frame rect honoring crop (recording) or fit mode (montage media). */
+  private drawSource(ctx: Ctx, layout: Layout, src: FrameSource, isRecording: boolean, fit: 'contain' | 'cover' | undefined, F: Rect): void {
+    const filter = this.colorFilter()
+    if (filter !== 'none') ctx.filter = filter
+    try {
+      if (isRecording) {
+        const c = layout.crop
+        ctx.drawImage(src.image, c.x * src.width, c.y * src.height, c.width * src.width, c.height * src.height, F.x, F.y, F.width, F.height)
+      } else {
+        const sa = src.width / Math.max(1, src.height)
+        const fa = F.width / Math.max(1, F.height)
+        if ((fit ?? 'cover') === 'cover') {
+          // crop source to fill the frame
+          let sw = src.width
+          let sh = src.height
+          if (sa > fa) sw = src.height * fa
+          else sh = src.width / fa
+          ctx.drawImage(src.image, (src.width - sw) / 2, (src.height - sh) / 2, sw, sh, F.x, F.y, F.width, F.height)
+        } else {
+          let dw = F.width
+          let dh = F.height
+          if (sa > fa) dh = F.width / sa
+          else dw = F.height * sa
+          ctx.drawImage(src.image, F.x + (F.width - dw) / 2, F.y + (F.height - dh) / 2, dw, dh)
+        }
+      }
+    } catch {
+      /* frame not ready */
+    }
+    ctx.filter = 'none'
+  }
+
+  /** Draw current (and outgoing) sources with the active transition inside the frame rect. */
+  private drawContent(ctx: Ctx, layout: Layout, sources: FrameSources, F: Rect): void {
+    const isRec = !sources.sourceId || sources.sourceId === 'screen'
+    const tr = sources.transition
+    const cur = sources.screen
+    const out = sources.outgoing ?? null
+    const drawCur = (): void => {
+      if (cur) this.drawSource(ctx, layout, cur, isRec, sources.fit, F)
+    }
+    const drawOut = (): void => {
+      if (out) this.drawSource(ctx, layout, out, false, sources.outgoingFit, F)
+    }
+    if (!tr || tr.progress >= 1 || !out) {
+      drawCur()
+      return
+    }
+    const p = clamp(tr.progress, 0, 1)
+    const e = ease('ease-in-out', p)
+    switch (tr.type) {
+      case 'fade':
+        drawOut()
+        ctx.save()
+        ctx.globalAlpha = e
+        drawCur()
+        ctx.restore()
+        break
+      case 'dip-black':
+      case 'dip-white': {
+        const color = tr.type === 'dip-black' ? '#000' : '#fff'
+        if (p < 0.5) {
+          drawOut()
+          ctx.save()
+          ctx.globalAlpha = ease('ease-in-out', p * 2)
+          ctx.fillStyle = color
+          ctx.fillRect(F.x, F.y, F.width, F.height)
+          ctx.restore()
+        } else {
+          drawCur()
+          ctx.save()
+          ctx.globalAlpha = 1 - ease('ease-in-out', (p - 0.5) * 2)
+          ctx.fillStyle = color
+          ctx.fillRect(F.x, F.y, F.width, F.height)
+          ctx.restore()
+        }
+        break
+      }
+      case 'slide-left':
+      case 'slide-right':
+      case 'slide-up':
+      case 'slide-down': {
+        const dx = tr.type === 'slide-left' ? -1 : tr.type === 'slide-right' ? 1 : 0
+        const dy = tr.type === 'slide-up' ? -1 : tr.type === 'slide-down' ? 1 : 0
+        ctx.save()
+        ctx.translate(dx * e * F.width, dy * e * F.height)
+        drawOut()
+        ctx.restore()
+        ctx.save()
+        ctx.translate(-dx * (1 - e) * F.width, -dy * (1 - e) * F.height)
+        drawCur()
+        ctx.restore()
+        break
+      }
+      case 'wipe':
+        drawOut()
+        ctx.save()
+        ctx.beginPath()
+        ctx.rect(F.x, F.y, F.width * e, F.height)
+        ctx.clip()
+        drawCur()
+        ctx.restore()
+        break
+      case 'zoom': {
+        ctx.save()
+        const s1 = 1 + e * 0.35
+        ctx.translate(F.x + F.width / 2, F.y + F.height / 2)
+        ctx.scale(s1, s1)
+        ctx.translate(-(F.x + F.width / 2), -(F.y + F.height / 2))
+        ctx.globalAlpha = 1 - e
+        drawOut()
+        ctx.restore()
+        ctx.save()
+        const s2 = 0.8 + e * 0.2
+        ctx.translate(F.x + F.width / 2, F.y + F.height / 2)
+        ctx.scale(s2, s2)
+        ctx.translate(-(F.x + F.width / 2), -(F.y + F.height / 2))
+        ctx.globalAlpha = e
+        drawCur()
+        ctx.restore()
+        break
+      }
+      case 'blur': {
+        const b = Math.sin(p * Math.PI) * 24 * layout.unit
+        ctx.save()
+        ctx.filter = `blur(${b.toFixed(1)}px)`
+        if (p < 0.5) drawOut()
+        else drawCur()
+        ctx.filter = 'none'
+        ctx.restore()
+        ctx.save()
+        ctx.globalAlpha = p < 0.5 ? 0 : (p - 0.5) * 2
+        if (p >= 0.5) drawCur()
+        ctx.restore()
+        break
+      }
+      default:
+        drawCur()
+    }
+  }
+
+  private drawScreenFrame(ctx: Ctx, layout: Layout, sources: FrameSources, opts: RenderOptions): void {
     const r = this.render
     const F = layout.screen
     const radius = r.cornerRadius * layout.unit
     const shape = (): void => roundRectPath(ctx, F.x, F.y, F.width, F.height, radius)
+    const screen = sources.screen
 
     // Shadow (pre-rendered once per layout/settings — blur is expensive per frame)
     if (r.shadow.enabled && r.shadow.opacity > 0 && r.background.type !== 'transparent') {
@@ -284,20 +434,8 @@ export class Compositor {
     ctx.clip()
     ctx.fillStyle = '#000'
     ctx.fillRect(F.x, F.y, F.width, F.height)
-    if (screen) {
-      const c = layout.crop
-      const sx = c.x * screen.width
-      const sy = c.y * screen.height
-      const sw = c.width * screen.width
-      const sh = c.height * screen.height
-      const filter = this.colorFilter()
-      if (filter !== 'none') ctx.filter = filter
-      try {
-        ctx.drawImage(screen.image, sx, sy, sw, sh, F.x, F.y, F.width, F.height)
-      } catch {
-        /* frame not ready */
-      }
-      ctx.filter = 'none'
+    if (screen || sources.outgoing) {
+      this.drawContent(ctx, layout, sources, F)
     } else if (opts.preview) {
       ctx.fillStyle = '#14151f'
       ctx.fillRect(F.x, F.y, F.width, F.height)

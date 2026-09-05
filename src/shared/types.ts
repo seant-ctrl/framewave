@@ -37,7 +37,7 @@ export interface MediaDeviceSummary {
 
 // ── Recording ───────────────────────────────────────────────────────────────
 
-export type RecordingMode = 'display' | 'window' | 'region'
+export type RecordingMode = 'display' | 'window' | 'region' | 'montage'
 
 export interface RecordingOptions {
   mode: RecordingMode
@@ -84,6 +84,11 @@ export interface RecordingEvents {
 }
 
 export interface MediaAsset {
+  /** Stable id used by clips (`sourceId`). The recording's screen asset has id 'screen'. */
+  id?: string
+  kind?: 'video' | 'image'
+  /** Display name (original file name) */
+  name?: string
   file: string // file name inside the project directory
   width?: number
   height?: number
@@ -109,6 +114,8 @@ export interface RecordingMeta {
   camera?: MediaAsset
   mic?: MediaAsset
   system?: MediaAsset
+  /** Additional media sources (montage mode): videos and images referenced by clips via sourceId. */
+  media?: MediaAsset[]
   /** Events file (JSON of RecordingEvents) */
   events?: string
   /** Offset between the start of the screen recording and the events clock. */
@@ -126,13 +133,29 @@ export interface RecordingMeta {
 
 // ── Timeline ────────────────────────────────────────────────────────────────
 
+export type TransitionType = 'cut' | 'fade' | 'dip-black' | 'dip-white' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down' | 'wipe' | 'zoom' | 'blur'
+
+export interface Transition {
+  type: TransitionType
+  durationMs: number
+}
+
 export interface Clip {
   id: string
+  /** Media source: undefined → the recording's screen video; otherwise a MediaAsset id from recording.media. */
+  sourceId?: string
   /** Source time range this clip plays. */
   sourceStart: number
   sourceEnd: number
   /** Playback speed multiplier. 1 = normal. */
   speed: number
+  /** Own-audio volume (0..2) & mute for this clip's source audio. */
+  volume?: number
+  muted?: boolean
+  /** How the source fills the frame when its aspect differs. */
+  fit?: 'contain' | 'cover'
+  /** Transition from the previous clip into this one (overlaps the two clips). */
+  transitionIn?: Transition
   /** Extra: transition in/out */
   fadeIn?: number
   fadeOut?: number

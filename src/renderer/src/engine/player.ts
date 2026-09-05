@@ -1,9 +1,9 @@
-import type { Project, Timeline } from '@shared/types'
+import type { Project, Timeline, TransitionType } from '@shared/types'
 import { projectMediaUrl } from '@/lib/fw'
-import { clipAt, placeClips, timelineDuration, timelineToSource } from './timeline'
-import type { FrameSources } from './compositor'
+import { activeClipsAt, clipAt, placeClips, sourceTimeOf, timelineDuration, timelineToSource, assetFor, type ClipPlacement } from './timeline'
+import type { FrameSources, FrameSource } from './compositor'
 
-type TrackName = 'screen' | 'camera' | 'mic' | 'system' | 'music'
+type TrackName = 'camera' | 'mic' | 'system' | 'music'
 
 interface Track {
   el: HTMLVideoElement | HTMLAudioElement
@@ -14,12 +14,24 @@ interface Track {
   basis: 'source' | 'timeline'
 }
 
+interface SourceEl {
+  id: string
+  kind: 'video' | 'image'
+  el: HTMLVideoElement | HTMLImageElement
+  ready: boolean
+  gain: GainNode | null
+  width: number
+  height: number
+}
+
 /**
- * Synchronised multi-track media player for the editor preview. The screen
- * video is the master clock; every other element is nudged to follow it.
+ * Synchronised multi-track media player for the editor preview. The current
+ * clip's video is the master clock; every other element is nudged to follow it.
+ * Supports several video/image sources (montage) and transition overlaps.
  */
 export class MediaPlayer {
   tracks = new Map<TrackName, Track>()
+  sources = new Map<string, SourceEl>()
   private ctx: AudioContext | null = null
   private master: GainNode | null = null
   private timeline: Timeline
@@ -29,7 +41,6 @@ export class MediaPlayer {
   private clock0 = 0
   private time0 = 0
   private currentClipIndex = -1
-  private seekSeq = 0
   private destroyed = false
   onEnded: (() => void) | null = null
   /** Fired whenever a media element becomes ready / seeks, so the preview can repaint. */
@@ -40,35 +51,8 @@ export class MediaPlayer {
   constructor(project: Project) {
     this.project = project
     this.timeline = project.timeline
-    this.build()
-  }
-
-  private build(): void {
-    const r = this.project.recording
-    const dir = this.project.dir
-    const mk = (name: TrackName, file: string, offsetMs: number, video: boolean, basis: Track['basis'] = 'source'): void => {
-      const el = document.createElement(video ? 'video' : 'audio') as HTMLVideoElement
-      el.src = projectMediaUrl(dir, file)
-      el.preload = 'auto'
-      el.crossOrigin = 'anonymous'
-      el.playsInline = true
-      el.muted = video && name === 'camera' // camera audio comes via mic
-      const track: Track = { el, offsetMs, ready: false, gain: null, basis }
-      el.addEventListener('loadedmetadata', () => (track.ready = true))
-      for (const ev of ['loadeddata', 'seeked', 'canplay']) el.addEventListener(ev, () => this.onReady?.())
-      el.addEventListener('error', () => {
-        if (!el.src || this.destroyed) return
-        console.warn(`[player] failed to load ${name}:`, el.error?.message ?? el.error)
-      })
-      this.tracks.set(name, track)
-    }
-    if (r.screen) mk('screen', r.screen.file, 0, true)
-    if (r.camera) mk('camera', r.camera.file, r.camera.offsetMs ?? 0, true)
-    if (r.mic) mk('mic', r.mic.file, r.mic.offsetMs ?? 0, false)
-    if (r.system) mk('system', r.system.file, r.system.offsetMs ?? 0, false)
-    if (this.timeline.audio.music) mk('music', this.timeline.audio.music.file, this.timeline.audio.music.offset, false, 'timeline')
     this.setupAudio()
-    this.applyVolumes()
+    this.build()
   }
 
   private setupAudio(): void {
@@ -76,42 +60,133 @@ export class MediaPlayer {
       this.ctx = new AudioContext({ latencyHint: 'interactive' })
       this.master = this.ctx.createGain()
       this.master.connect(this.ctx.destination)
-      for (const [name, t] of this.tracks) {
-        if (name === 'camera') continue
-        const src = this.ctx.createMediaElementSource(t.el)
-        const g = this.ctx.createGain()
-        src.connect(g)
-        g.connect(this.master)
-        t.gain = g
-      }
     } catch (e) {
       console.warn('audio graph failed', e)
     }
+  }
+
+  private connectGain(el: HTMLMediaElement): GainNode | null {
+    if (!this.ctx || !this.master) return null
+    try {
+      const src = this.ctx.createMediaElementSource(el)
+      const g = this.ctx.createGain()
+      src.connect(g)
+      g.connect(this.master)
+      return g
+    } catch {
+      return null
+    }
+  }
+
+  private mkMedia(url: string, video: boolean): HTMLVideoElement | HTMLAudioElement {
+    const el = document.createElement(video ? 'video' : 'audio') as HTMLVideoElement
+    el.src = url
+    el.preload = 'auto'
+    el.crossOrigin = 'anonymous'
+    el.playsInline = true
+    for (const ev of ['loadeddata', 'seeked', 'canplay']) el.addEventListener(ev, () => this.onReady?.())
+    el.addEventListener('error', () => {
+      if (!el.src || this.destroyed) return
+      console.warn('[player] failed to load media:', el.error?.message ?? el.error)
+    })
+    return el
+  }
+
+  private build(): void {
+    const r = this.project.recording
+    const dir = this.project.dir
+    // Video/image sources
+    const ensureSource = (id: string): void => {
+      if (this.sources.has(id)) return
+      const asset = assetFor(this.project, id === 'screen' ? undefined : id)
+      if (!asset) return
+      if (asset.kind === 'image') {
+        const img = new Image()
+        img.crossOrigin = 'anonymous'
+        const s: SourceEl = { id, kind: 'image', el: img, ready: false, gain: null, width: asset.width ?? 1920, height: asset.height ?? 1080 }
+        img.onload = () => {
+          s.ready = true
+          s.width = img.naturalWidth
+          s.height = img.naturalHeight
+          this.onReady?.()
+        }
+        img.src = projectMediaUrl(dir, asset.file)
+        this.sources.set(id, s)
+      } else {
+        const el = this.mkMedia(projectMediaUrl(dir, asset.file), true) as HTMLVideoElement
+        el.muted = false
+        const s: SourceEl = { id, kind: 'video', el, ready: false, gain: this.connectGain(el), width: asset.width ?? 0, height: asset.height ?? 0 }
+        el.addEventListener('loadedmetadata', () => {
+          s.ready = true
+          s.width = el.videoWidth
+          s.height = el.videoHeight
+        })
+        this.sources.set(id, s)
+      }
+    }
+    if (r.screen) ensureSource('screen')
+    for (const c of this.timeline.clips) ensureSource(c.sourceId ?? 'screen')
+
+    const mk = (name: TrackName, file: string, offsetMs: number, video: boolean, basis: Track['basis'] = 'source'): void => {
+      const el = this.mkMedia(projectMediaUrl(dir, file), video)
+      if (name === 'camera') el.muted = true
+      const track: Track = { el, offsetMs, ready: false, gain: null, basis }
+      el.addEventListener('loadedmetadata', () => (track.ready = true))
+      if (name !== 'camera') track.gain = this.connectGain(el)
+      this.tracks.set(name, track)
+    }
+    if (r.camera) mk('camera', r.camera.file, r.camera.offsetMs ?? 0, true)
+    if (r.mic) mk('mic', r.mic.file, r.mic.offsetMs ?? 0, false)
+    if (r.system) mk('system', r.system.file, r.system.offsetMs ?? 0, false)
+    if (this.timeline.audio.music) mk('music', this.timeline.audio.music.file, this.timeline.audio.music.offset, false, 'timeline')
+    this.applyVolumes()
   }
 
   update(project: Project): void {
     const musicChanged = project.timeline.audio.music?.file !== this.project.timeline.audio.music?.file
     this.project = project
     this.timeline = project.timeline
+    // New sources (media added)
+    for (const c of project.timeline.clips) {
+      const id = c.sourceId ?? 'screen'
+      if (!this.sources.has(id)) {
+        const asset = assetFor(project, c.sourceId)
+        if (!asset) continue
+        if (asset.kind === 'image') {
+          const img = new Image()
+          img.crossOrigin = 'anonymous'
+          const s: SourceEl = { id, kind: 'image', el: img, ready: false, gain: null, width: asset.width ?? 1920, height: asset.height ?? 1080 }
+          img.onload = () => {
+            s.ready = true
+            s.width = img.naturalWidth
+            s.height = img.naturalHeight
+            this.onReady?.()
+          }
+          img.src = projectMediaUrl(project.dir, asset.file)
+          this.sources.set(id, s)
+        } else {
+          const el = this.mkMedia(projectMediaUrl(project.dir, asset.file), true) as HTMLVideoElement
+          const s: SourceEl = { id, kind: 'video', el, ready: false, gain: this.connectGain(el), width: asset.width ?? 0, height: asset.height ?? 0 }
+          el.addEventListener('loadedmetadata', () => {
+            s.ready = true
+            s.width = el.videoWidth
+            s.height = el.videoHeight
+          })
+          this.sources.set(id, s)
+        }
+      }
+    }
     if (musicChanged) {
       const m = this.tracks.get('music')
       if (m) {
         m.el.pause()
-        m.el.src = ''
+        m.el.removeAttribute('src')
         this.tracks.delete('music')
       }
-      if (project.timeline.audio.music && this.ctx) {
-        const el = document.createElement('audio')
-        el.src = projectMediaUrl(project.dir, project.timeline.audio.music.file)
-        el.preload = 'auto'
-        el.crossOrigin = 'anonymous'
-        const track: Track = { el, offsetMs: project.timeline.audio.music.offset, ready: false, gain: null, basis: 'timeline' }
+      if (project.timeline.audio.music) {
+        const el = this.mkMedia(projectMediaUrl(project.dir, project.timeline.audio.music.file), false)
+        const track: Track = { el, offsetMs: project.timeline.audio.music.offset, ready: false, gain: this.connectGain(el), basis: 'timeline' }
         el.addEventListener('loadedmetadata', () => (track.ready = true))
-        const src = this.ctx.createMediaElementSource(el)
-        const g = this.ctx.createGain()
-        src.connect(g)
-        g.connect(this.master!)
-        track.gain = g
         this.tracks.set('music', track)
       }
     } else {
@@ -126,18 +201,40 @@ export class MediaPlayer {
   applyVolumes(): void {
     const a = this.timeline.audio
     const vol = (v: number, muted: boolean): number => (this.muted || muted ? 0 : v * this.masterVolume)
-    const set = (name: TrackName, v: number): void => {
+    const setTrack = (name: TrackName, v: number): void => {
       const t = this.tracks.get(name)
       if (!t) return
       if (t.gain) t.gain.gain.value = v
       else t.el.volume = Math.min(1, v)
     }
-    set('mic', vol(a.mic.volume, a.mic.muted))
-    set('system', vol(a.system.volume, a.system.muted))
-    // If the screen video itself has audio (imported video), treat it as the system track
-    set('screen', vol(a.system.volume, a.system.muted))
-    set('camera', 0)
-    if (a.music) set('music', vol(a.music.volume, a.music.muted))
+    setTrack('mic', vol(a.mic.volume, a.mic.muted))
+    setTrack('system', vol(a.system.volume, a.system.muted))
+    setTrack('camera', 0)
+    if (a.music) setTrack('music', vol(a.music.volume, a.music.muted))
+    this.applyClipVolumes()
+  }
+
+  /** Per-source gains follow the active clip (and transition crossfade). */
+  private applyClipVolumes(): void {
+    const a = this.timeline.audio
+    const act = activeClipsAt(this.timeline, this._time)
+    const gainFor = (p: ClipPlacement | null, fade: number): number => {
+      if (!p) return 0
+      const c = p.clip
+      const own = c.muted ? 0 : (c.volume ?? 1)
+      // The recording's own screen audio is controlled by the "system" track settings
+      const sys = !c.sourceId || c.sourceId === 'screen' ? (a.system.muted ? 0 : a.system.volume) : 1
+      return this.muted ? 0 : own * sys * this.masterVolume * fade
+    }
+    const curId = act?.current.clip.sourceId ?? 'screen'
+    const outId = act?.outgoing ? act.outgoing.clip.sourceId ?? 'screen' : null
+    for (const [id, s] of this.sources) {
+      if (!s.gain) continue
+      let g = 0
+      if (act && id === curId) g = gainFor(act.current, act.outgoing ? act.progress : 1)
+      else if (act && outId && id === outId) g = gainFor(act.outgoing, 1 - act.progress)
+      s.gain.gain.value = g
+    }
   }
 
   get time(): number {
@@ -150,21 +247,41 @@ export class MediaPlayer {
     return timelineDuration(this.timeline)
   }
 
-  /** Whether the screen element is ready to be drawn. */
+  /** Whether the current source is ready to be drawn. */
   get ready(): boolean {
-    const s = this.tracks.get('screen')
-    return !!s && s.el.readyState >= 2
+    const p = clipAt(this.timeline, this._time)
+    const s = this.sources.get(p?.clip.sourceId ?? 'screen')
+    return !!s && (s.kind === 'image' ? s.ready : (s.el as HTMLVideoElement).readyState >= 2)
+  }
+
+  private frameOf(id: string): FrameSource | null {
+    const s = this.sources.get(id)
+    if (!s) return null
+    if (s.kind === 'image') return s.ready ? { image: s.el, width: s.width, height: s.height } : null
+    const v = s.el as HTMLVideoElement
+    return v.readyState >= 2 && v.videoWidth ? { image: v, width: v.videoWidth, height: v.videoHeight } : null
   }
 
   frameSources(): FrameSources {
-    const s = this.tracks.get('screen')?.el as HTMLVideoElement | undefined
+    const act = activeClipsAt(this.timeline, this._time)
+    const cur = act?.current ?? null
+    const curId = cur?.clip.sourceId ?? 'screen'
     const c = this.tracks.get('camera')?.el as HTMLVideoElement | undefined
     const s2 = timelineToSource(this.timeline, this._time)
     const camT = c ? s2 - (this.tracks.get('camera')!.offsetMs ?? 0) : 0
-    return {
-      screen: s && s.readyState >= 2 && s.videoWidth ? { image: s, width: s.videoWidth, height: s.videoHeight } : null,
-      camera: c && c.readyState >= 2 && c.videoWidth && camT >= 0 && camT <= c.duration * 1000 + 100 ? { image: c, width: c.videoWidth, height: c.videoHeight } : null
+    const isRecording = !cur || !cur.clip.sourceId || cur.clip.sourceId === 'screen'
+    const out: FrameSources = {
+      screen: this.frameOf(curId),
+      camera: isRecording && c && c.readyState >= 2 && c.videoWidth && camT >= 0 && camT <= c.duration * 1000 + 100 ? { image: c, width: c.videoWidth, height: c.videoHeight } : null,
+      sourceId: cur?.clip.sourceId,
+      fit: cur?.clip.fit
     }
+    if (act?.outgoing && act.current.clip.transitionIn) {
+      out.outgoing = this.frameOf(act.outgoing.clip.sourceId ?? 'screen')
+      out.outgoingFit = act.outgoing.clip.fit
+      out.transition = { type: act.current.clip.transitionIn.type as TransitionType, progress: act.progress }
+    }
+    return out
   }
 
   private mediaTime(track: Track, sourceMs: number, timelineMs: number): number {
@@ -172,17 +289,36 @@ export class MediaPlayer {
     return (sourceMs - track.offsetMs) / 1000
   }
 
+  private seekSource(id: string, sec: number): void {
+    const s = this.sources.get(id)
+    if (!s || s.kind !== 'video') return
+    const v = s.el as HTMLVideoElement
+    if (Math.abs(v.currentTime - sec) > 0.012 || !this._playing) {
+      try {
+        v.currentTime = Math.max(0, sec)
+      } catch {
+        /* not ready */
+      }
+    }
+  }
+
   seek(t: number): void {
     const dur = this.duration
     t = Math.max(0, Math.min(dur, t))
     this._time = t
-    const s = timelineToSource(this.timeline, t)
-    const place = clipAt(this.timeline, t)
+    const act = activeClipsAt(this.timeline, t)
+    const place = act?.current ?? null
     this.currentClipIndex = place?.index ?? -1
-    const seq = ++this.seekSeq
-    for (const [, tr] of this.tracks) {
-      const mt = this.mediaTime(tr, s, t)
+    // Recording-clock tracks follow the recording source time; other sources have their own
+    const sRec = place && (!place.clip.sourceId || place.clip.sourceId === 'screen') ? sourceTimeOf(place, t) : -1
+    const speed = place?.clip.speed ?? 1
+    for (const [name, tr] of this.tracks) {
+      const mt = name === 'music' ? this.mediaTime(tr, 0, t) : sRec >= 0 ? this.mediaTime(tr, sRec, t) : -1
       if (!isFinite(mt)) continue
+      if (mt < 0) {
+        tr.el.pause()
+        continue
+      }
       if (Math.abs(tr.el.currentTime - mt) > 0.012 || !this._playing) {
         try {
           tr.el.currentTime = Math.max(0, mt)
@@ -190,13 +326,50 @@ export class MediaPlayer {
           /* not ready */
         }
       }
-      tr.el.playbackRate = place?.clip.speed ?? 1
+      tr.el.playbackRate = name === 'music' ? 1 : speed
     }
+    // Pause sources that are not active
+    const activeIds = new Set<string>()
+    if (place) {
+      const id = place.clip.sourceId ?? 'screen'
+      activeIds.add(id)
+      this.seekSource(id, sourceTimeOf(place, t) / 1000)
+      const s = this.sources.get(id)
+      if (s?.kind === 'video') (s.el as HTMLVideoElement).playbackRate = speed
+    }
+    if (act?.outgoing) {
+      const id = act.outgoing.clip.sourceId ?? 'screen'
+      activeIds.add(id)
+      this.seekSource(id, sourceTimeOf(act.outgoing, t) / 1000)
+    }
+    for (const [id, s] of this.sources) {
+      if (s.kind === 'video' && !activeIds.has(id)) (s.el as HTMLVideoElement).pause()
+    }
+    this.applyClipVolumes()
     if (this._playing) {
       this.clock0 = performance.now()
       this.time0 = t
     }
-    void seq
+  }
+
+  private playActive(): void {
+    const act = activeClipsAt(this.timeline, this._time)
+    if (!act) return
+    const ids = [act.current.clip.sourceId ?? 'screen', ...(act.outgoing ? [act.outgoing.clip.sourceId ?? 'screen'] : [])]
+    for (const id of ids) {
+      const s = this.sources.get(id)
+      if (s?.kind === 'video') (s.el as HTMLVideoElement).play().catch(() => {})
+    }
+    const place = act.current
+    const sRec = !place.clip.sourceId || place.clip.sourceId === 'screen' ? sourceTimeOf(place, this._time) : -1
+    for (const [name, tr] of this.tracks) {
+      const mt = name === 'music' ? this.mediaTime(tr, 0, this._time) : sRec >= 0 ? this.mediaTime(tr, sRec, this._time) : -1
+      if (mt < 0 || (tr.ready && mt > tr.el.duration)) {
+        tr.el.pause()
+        continue
+      }
+      tr.el.play().catch(() => {})
+    }
   }
 
   async play(): Promise<void> {
@@ -207,35 +380,27 @@ export class MediaPlayer {
     this.seek(this._time)
     this.clock0 = performance.now()
     this.time0 = this._time
-    const s = timelineToSource(this.timeline, this._time)
-    for (const [, tr] of this.tracks) {
-      const mt = this.mediaTime(tr, s, this._time)
-      if (mt < 0 || (tr.ready && mt > tr.el.duration)) {
-        tr.el.pause()
-        continue
-      }
-      tr.el.play().catch(() => {})
-    }
+    this.playActive()
   }
 
   pause(): void {
     if (!this._playing) return
     this._playing = false
     for (const [, tr] of this.tracks) tr.el.pause()
+    for (const [, s] of this.sources) if (s.kind === 'video') (s.el as HTMLVideoElement).pause()
   }
 
   /** Advance the clock. Call once per animation frame while playing. */
   tick(): number {
     if (!this._playing) return this._time
-    const screen = this.tracks.get('screen')
     const place = clipAt(this.timeline, this._time)
+    const master = place ? this.sources.get(place.clip.sourceId ?? 'screen') : undefined
     let t: number
-    if (screen && screen.ready && !screen.el.paused && place) {
-      // Screen video is master
-      const sMs = screen.el.currentTime * 1000
+    if (place && master && master.kind === 'video' && master.ready && !(master.el as HTMLVideoElement).paused) {
+      // Current clip's video is master
+      const sMs = (master.el as HTMLVideoElement).currentTime * 1000
       const local = (sMs - place.clip.sourceStart) / (place.clip.speed || 1)
       t = place.start + local
-      // If we drifted before the clip start (seek landed early) use wall clock
       if (local < -50) t = this.time0 + (performance.now() - this.clock0)
     } else {
       t = this.time0 + (performance.now() - this.clock0)
@@ -247,20 +412,34 @@ export class MediaPlayer {
       this.onEnded?.()
       return this._time
     }
-    // Clip boundary → jump to the next clip's source position
+    // Clip boundary → switch sources
     const np = clipAt(this.timeline, t)
     if (np && np.index !== this.currentClipIndex) {
       this._time = t
       this.seek(Math.max(np.start, t))
-      for (const [, tr] of this.tracks) if (tr.el.paused) tr.el.play().catch(() => {})
+      this.playActive()
       return this._time
     }
     this._time = t
-    // Drift correction for secondary tracks
-    const s = timelineToSource(this.timeline, t)
+    const act = activeClipsAt(this.timeline, t)
+    // Outgoing clip during a transition must be playing
+    if (act?.outgoing) {
+      const s = this.sources.get(act.outgoing.clip.sourceId ?? 'screen')
+      if (s?.kind === 'video') {
+        const v = s.el as HTMLVideoElement
+        const want = sourceTimeOf(act.outgoing, t) / 1000
+        if (v.paused) {
+          v.currentTime = want
+          v.play().catch(() => {})
+        } else if (Math.abs(v.currentTime - want) > 0.12) v.currentTime = want
+      }
+      this.applyClipVolumes()
+    }
+    // Drift correction for secondary tracks (recording clock)
+    const sRec = place && (!place.clip.sourceId || place.clip.sourceId === 'screen') ? sourceTimeOf(place, t) : -1
     for (const [name, tr] of this.tracks) {
-      if (name === 'screen' || !tr.ready) continue
-      const mt = this.mediaTime(tr, s, t)
+      if (!tr.ready) continue
+      const mt = name === 'music' ? this.mediaTime(tr, 0, t) : sRec >= 0 ? this.mediaTime(tr, sRec, t) : -1
       if (mt < 0 || mt > tr.el.duration) {
         if (!tr.el.paused) tr.el.pause()
         continue
@@ -272,8 +451,7 @@ export class MediaPlayer {
         tr.el.currentTime = mt
       }
     }
-    // Screen element itself paused unexpectedly (e.g. buffering)
-    if (screen && screen.ready && screen.el.paused && this._playing) screen.el.play().catch(() => {})
+    if (master && master.kind === 'video' && master.ready && (master.el as HTMLVideoElement).paused && this._playing) (master.el as HTMLVideoElement).play().catch(() => {})
     return this._time
   }
 
@@ -289,7 +467,14 @@ export class MediaPlayer {
       tr.el.removeAttribute('src')
       tr.el.load()
     }
+    for (const [, s] of this.sources) {
+      if (s.kind === 'video') {
+        s.el.removeAttribute('src')
+        ;(s.el as HTMLVideoElement).load()
+      } else (s.el as HTMLImageElement).src = ''
+    }
     this.tracks.clear()
+    this.sources.clear()
     void this.ctx?.close()
   }
 }

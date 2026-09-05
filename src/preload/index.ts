@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron'
 import type {
   AppSettings,
   CaptureSource,
@@ -9,6 +9,7 @@ import type {
   ProjectSummary,
   RecordingEvents,
   RecordingMeta,
+  MediaAsset,
   Rect,
   FfmpegJob,
   FfmpegProgress
@@ -29,6 +30,8 @@ function mediaUrl(absPath: string): string {
 const api = {
   platform: process.platform,
   mediaUrl,
+  /** Absolute path of a File dropped into the window. */
+  pathForFile: (f: File): string => webUtils.getPathForFile(f),
   window: {
     minimize: (): void => ipcRenderer.send('win:minimize'),
     maximize: (): void => ipcRenderer.send('win:maximize'),
@@ -89,6 +92,8 @@ const api = {
     import: (filePath?: string): Promise<Project | null> => ipcRenderer.invoke('project:import', filePath),
     importAsset: (id: string, kind: 'audio' | 'image' | 'video'): Promise<{ file: string; path: string } | null> =>
       ipcRenderer.invoke('project:importAsset', id, kind),
+    createMontage: (filePaths?: string[]): Promise<Project | null> => ipcRenderer.invoke('project:createMontage', filePaths),
+    addMedia: (id: string, filePaths?: string[]): Promise<MediaAsset[]> => ipcRenderer.invoke('project:addMedia', id, filePaths),
     openFolder: (id: string): Promise<string> => ipcRenderer.invoke('project:openFolder', id),
     onProgress: (cb: (p: { id: string; label: string; progress: number }) => void): Unsub => on('project:progress', cb)
   },

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Circle, Import, MoreHorizontal, Trash2, FolderOpen, Copy, Pencil, Search, Film, Clock } from 'lucide-react'
+import { Circle, Import, MoreHorizontal, Trash2, FolderOpen, Copy, Pencil, Search, Film, Clock, Clapperboard } from 'lucide-react'
 import type { ProjectSummary } from '@shared/types'
 import { fw } from '@/lib/fw'
 import { useApp } from '@/store/appStore'
@@ -41,13 +41,34 @@ export function HomeScreen(): React.JSX.Element {
     }
   }
 
+  const createMontage = async (paths?: string[]): Promise<void> => {
+    setImporting({ label: 'Importing media', progress: 0 })
+    const unsub = fw.projects.onProgress((p) => p.id === 'import' && setImporting({ label: p.label, progress: p.progress }))
+    try {
+      const p = await fw.projects.createMontage(paths)
+      if (p) navigate({ name: 'editor', projectId: p.id })
+    } catch (e) {
+      toast({ kind: 'error', title: 'Could not create montage', message: (e as Error).message })
+    } finally {
+      unsub()
+      setImporting(null)
+    }
+  }
+
   const onDrop = async (e: React.DragEvent): Promise<void> => {
     e.preventDefault()
-    const f = e.dataTransfer.files[0]
-    if (!f) return
-    const path = (window as unknown as { webUtils?: { getPathForFile(f: File): string } }).webUtils?.getPathForFile(f) ?? (f as unknown as { path?: string }).path
-    if (path) await importVideo(path)
-    else await importVideo()
+    const paths = Array.from(e.dataTransfer.files)
+      .map((f) => {
+        try {
+          return fw.pathForFile(f)
+        } catch {
+          return ''
+        }
+      })
+      .filter((p) => /\.(mp4|mov|webm|mkv|avi|m4v|png|jpe?g|webp|bmp|gif)$/i.test(p))
+    if (paths.length === 0) return
+    if (paths.length === 1 && /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(paths[0])) await importVideo(paths[0])
+    else await createMontage(paths)
   }
 
   const filtered = (projects ?? []).filter((p) => p.name.toLowerCase().includes(query.toLowerCase()))
@@ -56,7 +77,7 @@ export function HomeScreen(): React.JSX.Element {
     <div className="h-full overflow-y-auto" onDrop={onDrop} onDragOver={(e) => e.preventDefault()}>
       <div className="max-w-[1200px] mx-auto px-8 py-8">
         {/* Hero */}
-        <div className="grid grid-cols-[1.4fr_1fr] gap-4 mb-10">
+        <div className="grid grid-cols-[1.3fr_1fr_1fr] gap-4 mb-10">
           <button
             onClick={() => navigate({ name: 'record' })}
             className="group relative overflow-hidden rounded-2xl p-6 text-left border border-white/10 transition-transform hover:scale-[1.01]"
@@ -74,13 +95,25 @@ export function HomeScreen(): React.JSX.Element {
             <div className="mt-5 inline-flex items-center gap-2 btn btn-primary btn-lg">Start recording</div>
             <kbd className="absolute right-5 bottom-5 opacity-70">Ctrl Shift R</kbd>
           </button>
+          <button onClick={() => void createMontage()} className="rounded-2xl p-6 text-left card hover:border-white/20 transition-colors flex flex-col justify-between" style={{ background: 'radial-gradient(120% 140% at 100% 0%, rgba(34,193,163,0.28), rgba(16,17,26,1) 60%)' }}>
+            <div>
+              <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-[#5eead4] font-semibold">
+                <Clapperboard size={12} /> New montage
+              </div>
+              <div className="text-[20px] font-semibold tracking-tight mt-2 leading-tight">Assemble clips & photos</div>
+              <div className="text-fg-2 text-[13px] mt-2">Pick several videos and images, reorder them, add transitions and music.</div>
+            </div>
+            <div className="mt-4 text-[12px] text-fg-3 flex items-center gap-1.5">
+              <Film size={13} /> Drop multiple files here to start
+            </div>
+          </button>
           <button onClick={() => void importVideo()} className="rounded-2xl p-6 text-left card hover:border-white/20 transition-colors flex flex-col justify-between">
             <div>
               <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-fg-3 font-semibold">
                 <Import size={12} /> Import
               </div>
               <div className="text-[20px] font-semibold tracking-tight mt-2 leading-tight">Edit an existing video</div>
-              <div className="text-fg-2 text-[13px] mt-2">MP4, MOV, WebM, MKV… Drop a file anywhere on this page.</div>
+              <div className="text-fg-2 text-[13px] mt-2">MP4, MOV, WebM, MKV… Drop a single file anywhere on this page.</div>
             </div>
             <div className="mt-4 text-[12px] text-fg-3 flex items-center gap-1.5">
               <Film size={13} /> Backgrounds, crop, captions, text, export
