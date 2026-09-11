@@ -223,7 +223,7 @@ export function RecorderScreen(): React.JSX.Element {
                   <Volume2 size={14} className="text-fg-2" /> System audio
                 </span>
               }
-              hint="Capture what you hear (apps, browser, music)"
+              hint={fw.platform === 'darwin' ? 'Capture what you hear (macOS 13+, uses Screen Recording permission)' : 'Capture what you hear (apps, browser, music)'}
             />
             <Toggle
               checked={cursorCapture}

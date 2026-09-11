@@ -78,6 +78,6 @@ Recordings are stored as folders under `Videos/Framewave/<project>/` containing 
 ## Notes
 
 - Requires Windows 10 2004+ for capture-excluded overlay windows; works on Windows 11.
-- macOS: editing, montage and export work as-is. Recording works with Chromium's screen/camera capture (grant Screen Recording, Camera, Microphone and Accessibility in System Settings); system-audio loopback and cursor hiding/shape are Windows-only for now.
+- macOS: editing, montage and export work as-is. Recording works with Chromium's screen/camera capture (grant Screen Recording, Camera, Microphone and Accessibility in System Settings). System audio is captured by a small bundled ScreenCaptureKit helper (`native/mac/sysaudio.swift`, macOS 13+). Cursor hiding/shape are Windows-only for now.
 - The Whisper model (≈40–250 MB depending on size) is downloaded from Hugging Face on first use and cached locally.
 - If the app is force-killed while recording, the system cursor is restored the next time it starts.

@@ -44,6 +44,10 @@ jobs:
       - name: Build renderer & main
         run: npm run build
 
+      - name: Build macOS system-audio helper (ScreenCaptureKit)
+        if: runner.os == 'macOS'
+        run: bash native/mac/build.sh
+
       - name: Package (${{ matrix.target }})
         run: npx electron-builder ${{ matrix.target }} --config electron-builder.yml --publish never
 

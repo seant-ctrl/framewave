@@ -61,6 +61,13 @@ const api = {
     stop: (startEpochMs?: number): Promise<RecordingEvents | null> => ipcRenderer.invoke('tracker:stop', startEpochMs),
     cursor: (): Promise<{ x: number; y: number } | null> => ipcRenderer.invoke('tracker:cursor')
   },
+  sysaudio: {
+    available: (): Promise<boolean> => ipcRenderer.invoke('sysaudio:available'),
+    start: (projectId: string, file: string): Promise<void> => ipcRenderer.invoke('sysaudio:start', projectId, file),
+    stop: (): Promise<void> => ipcRenderer.invoke('sysaudio:stop'),
+    pause: (): Promise<void> => ipcRenderer.invoke('sysaudio:pause'),
+    resume: (): Promise<void> => ipcRenderer.invoke('sysaudio:resume')
+  },
   hud: {
     show: (displayId?: number): Promise<void> => ipcRenderer.invoke('hud:show', displayId),
     hide: (): Promise<void> => ipcRenderer.invoke('hud:hide'),

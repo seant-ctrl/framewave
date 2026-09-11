@@ -23,6 +23,9 @@ nsis:
   allowToChangeInstallationDirectory: true
 mac:
   category: public.app-category.video
+  extraResources:
+    - from: native/mac/build/fw-sysaudio
+      to: fw-sysaudio
   target:
     - target: dmg
       arch: [arm64, x64]

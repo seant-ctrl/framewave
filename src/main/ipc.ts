@@ -4,6 +4,7 @@ import { join, dirname, basename } from 'path'
 import * as projects from './projects'
 import * as ffmpeg from './ffmpeg'
 import * as tracker from './tracker'
+import * as sysaudio from './sysaudio'
 import { getSettings, updateSettings } from './settings'
 import { mainWindow, hudWindow, showHud, hideHud, pickRegion, showCameraBubble, hideCameraBubble, focusMain } from './windows'
 import { toRendererError } from './util'
@@ -109,6 +110,13 @@ export function registerIpc(): void {
     const phys = tracker.windowRect(hwnd)
     return phys ? { phys, dip: screen.screenToDipRect(null, phys) } : null
   })
+
+  // ── macOS system audio helper ───────────────────────────────────────────
+  handle('sysaudio:available', () => sysaudio.available())
+  handle('sysaudio:start', (id: string, file: string) => sysaudio.start(join(projects.projectDir(id), file)))
+  handle('sysaudio:stop', () => sysaudio.stop())
+  handle('sysaudio:pause', () => sysaudio.pause())
+  handle('sysaudio:resume', () => sysaudio.resume())
 
   // ── Input tracker ───────────────────────────────────────────────────────
   handle('tracker:start', (target: tracker.TrackerTarget) => tracker.startTracking(target))

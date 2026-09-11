@@ -70,6 +70,8 @@ export class RecorderEngine {
   private cameraTrack: MediaStreamTrack | null = null
   private display: DisplayInfo | null = null
   private source: CaptureSource | null = null
+  /** macOS: system audio captured by the native ScreenCaptureKit helper (see main/sysaudio.ts) */
+  private useSysHelper = false
   onDone: ((project: Project) => void) | null = null
   onCancelled: (() => void) | null = null
 
@@ -127,6 +129,8 @@ export class RecorderEngine {
         if (this.snapshot.status === 'recording' || this.snapshot.status === 'paused') void this.stop()
       })
       const sysTracks = displayStream.getAudioTracks()
+      // macOS: Chromium has no loopback capture → use the bundled ScreenCaptureKit helper
+      this.useSysHelper = opts.systemAudio && sysTracks.length === 0 && fw.platform === 'darwin' && (await fw.sysaudio.available().catch(() => false))
 
       let cameraStream: MediaStream | null = null
       if (opts.cameraDeviceId) {
@@ -211,6 +215,14 @@ export class RecorderEngine {
       if (opts.cursorCapture) {
         const hwnd = source.kind === 'window' ? Number(source.id.split(':')[1]) : undefined
         await fw.tracker.start({ kind: source.kind === 'window' ? 'window' : 'display', displayId: display?.id, hwnd, hideCursor: opts.hideSystemCursor !== false })
+      }
+      if (this.useSysHelper) {
+        try {
+          await fw.sysaudio.start(project.id, 'system.wav')
+        } catch (e) {
+          console.warn('system audio helper failed, continuing without system audio', e)
+          this.useSysHelper = false
+        }
       }
       const startPromises = this.recs.map(
         (r) =>
@@ -332,6 +344,7 @@ export class RecorderEngine {
   pause(): void {
     if (this.snapshot.status !== 'recording') return
     for (const r of this.recs) if (r.recorder.state === 'recording') r.recorder.pause()
+    if (this.useSysHelper) void fw.sysaudio.pause()
     this.pauseStart = Date.now()
     this.emit({ status: 'paused' })
   }
@@ -339,6 +352,7 @@ export class RecorderEngine {
   resume(): void {
     if (this.snapshot.status !== 'paused') return
     for (const r of this.recs) if (r.recorder.state === 'paused') r.recorder.resume()
+    if (this.useSysHelper) void fw.sysaudio.resume()
     this.pauses.push({ start: this.pauseStart, end: Date.now() })
     this.emit({ status: 'recording' })
   }
@@ -358,7 +372,8 @@ export class RecorderEngine {
     this.ticker = null
     const stopEpoch = Date.now()
 
-    // Stop recorders and flush
+    // Stop recorders and flush (the system-audio helper stops at the same instant → end-aligned)
+    const sysStop = this.useSysHelper ? fw.sysaudio.stop().catch((e) => console.warn('sysaudio stop failed', e)) : null
     for (const r of this.recs) {
       try {
         if (r.recorder.state !== 'inactive') r.recorder.requestData()
@@ -368,6 +383,7 @@ export class RecorderEngine {
       }
     }
     await Promise.all(this.recs.map((r) => r.stopped))
+    if (sysStop) await sysStop
 
     // Events
     let events: RecordingEvents | null = null
@@ -397,6 +413,7 @@ export class RecorderEngine {
         if (rec.name === 'mic') r.mic = { file: rec.file, offsetMs }
         if (rec.name === 'system') r.system = { file: rec.file, offsetMs }
       }
+      if (this.useSysHelper) r.system = { file: 'system.wav', offsetMs: 0 }
       r.recordedAt = this.startEpoch
       r.stoppedAt = stopEpoch
       r.pausedMs = pausedMs
@@ -491,6 +508,7 @@ export class RecorderEngine {
   }
 
   private async teardown(): Promise<void> {
+    if (this.useSysHelper) await fw.sysaudio.stop().catch(() => {})
     this.unsubHud?.()
     this.unsubHud = null
     for (const s of this.streams) s.getTracks().forEach((t) => t.stop())

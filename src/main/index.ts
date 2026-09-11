@@ -42,6 +42,7 @@ import { registerIpc, capturePick } from './ipc'
 import { getSettings } from './settings'
 import { cancelAll } from './ffmpeg'
 import { stopTracking, restoreSystemCursors } from './tracker'
+import { stop as stopSysAudio } from './sysaudio'
 
 // Custom protocol for streaming local media into the renderer with range support.
 protocol.registerSchemesAsPrivileged([
@@ -188,6 +189,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   cancelAll()
   stopTracking()
+  void stopSysAudio()
   restoreSystemCursors()
   globalShortcut.unregisterAll()
 })
