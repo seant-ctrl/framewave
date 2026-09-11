@@ -20,3 +20,20 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+mac:
+  category: public.app-category.video
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  identity: null
+  extendInfo:
+    NSCameraUsageDescription: Framewave uses your camera for the webcam overlay in recordings.
+    NSMicrophoneUsageDescription: Framewave records your microphone during screen recordings.
+    NSScreenCaptureUsageDescription: Framewave records your screen.
+    NSAppleEventsUsageDescription: Framewave needs Accessibility access to track your cursor and clicks while recording.
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}

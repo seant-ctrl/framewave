@@ -135,7 +135,9 @@ app.whenReady().then(() => {
         const sources = await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
         const src = sources.find((s) => s.id === capturePick.sourceId) ?? sources.find((s) => s.id.startsWith('screen'))
         if (!src) return callback({})
-        callback({ video: src, audio: capturePick.systemAudio ? 'loopback' : undefined })
+        // Loopback (system) audio capture is only implemented by Chromium on Windows
+        const loopback = process.platform === 'win32' && capturePick.systemAudio
+        callback({ video: src, audio: loopback ? 'loopback' : undefined })
       } catch (e) {
         console.error('display media handler failed', e)
         callback({})
