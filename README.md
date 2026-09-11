@@ -52,7 +52,7 @@ npm run dist         # Windows installer + portable exe in release/
 npx electron-builder --mac   # on a Mac: .dmg / .zip (arm64 + x64) in release/
 ```
 
-CI (`.github/workflows/build.yml`) builds Windows and macOS packages on every push to `main` and attaches them to a GitHub Release when a `v*` tag is pushed. The macOS build is unsigned: open it once with right-click → Open (Gatekeeper).
+CI (`.github/workflows/build.yml`) builds Windows and macOS packages on every push to `main` and attaches them to a GitHub Release when a `v*` tag is pushed. The macOS build is ad-hoc signed (no Apple Developer certificate): open it once with right-click → Open, or System Settings → Privacy & Security → Open Anyway. If macOS still says the app is damaged, run `xattr -cr /Applications/Framewave.app`.
 
 Set `FW_DEBUG_PORT=9333` before `npm run dev` to expose the Chrome DevTools protocol for automation.
 

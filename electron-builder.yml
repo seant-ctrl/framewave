@@ -3,6 +3,7 @@ productName: Framewave
 npmRebuild: false
 buildDependenciesFromSource: false
 nodeGypRebuild: false
+afterPack: scripts/afterPack.cjs
 directories:
   buildResources: resources
   output: release
@@ -30,6 +31,7 @@ mac:
   hardenedRuntime: false
   gatekeeperAssess: false
   identity: null
+  type: distribution
   extendInfo:
     NSCameraUsageDescription: Framewave uses your camera for the webcam overlay in recordings.
     NSMicrophoneUsageDescription: Framewave records your microphone during screen recordings.
