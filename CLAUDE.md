@@ -16,6 +16,10 @@ Electron (37) + electron-vite + React 19 + TypeScript + Tailwind v4 desktop app:
 - `src/renderer/src/export/exporter.ts` — WebCodecs export via mediabunny. Frames are read **sequentially** (`FrameFeeder`); random `getSample()` calls are ~100× slower.
 - `src/renderer/src/recorder/recorder.ts` — recording engine (MediaRecorder per track, HUD sync, pause bookkeeping). Tracks are aligned by their common stop time in `finalizeRecording`; events are stored with absolute epoch times and converted there.
 
+## macOS notes
+- System audio: Chromium loopback is Windows-only, so `src/main/sysaudio.ts` spawns the bundled `fw-sysaudio` helper (Swift, `native/mac/sysaudio.swift`, ScreenCaptureKit, macOS 13+, built universal by `native/mac/build.sh` in CI and shipped via `extraResources`). It writes `system.wav`, pauses on SIGUSR1/resumes on SIGUSR2, finalizes on SIGTERM; the recorder stops it together with the MediaRecorders so end-alignment applies. Cursor hiding/shape and window-rect tracking remain Windows-only (koffi Win32).
+- Packaging: `scripts/afterPack.cjs` ad-hoc signs the .app (unsigned apps show as "damaged" on Apple Silicon); title bar uses `hiddenInset` traffic lights on mac.
+
 ## Montage model
 - `Clip.sourceId` selects a `MediaAsset` from `recording.media` (undefined/'screen' = the recording). `Clip.transitionIn` overlaps the previous clip: `placeClips()` in `engine/timeline.ts` computes overlapping placements and `activeClipsAt()` returns current + outgoing clip with progress. Compositor draws transitions in `drawContent`; player keeps one element per source and crossfades gains; exporter uses a `SourcePool` (one sequential `FrameFeeder` per video source, bitmaps for images); mixdown schedules each clip's own audio with fades matching the overlaps.
 - Media ingestion (`projects.ts: ingestMedia`) normalizes everything to H.264 MP4 (or copies images). UI: `panels/ClipPanel.tsx`, drag-reorder + transition badges in `Timeline.tsx`, `mediaImport.ts` for add/drop.
