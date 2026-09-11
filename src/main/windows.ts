@@ -31,7 +31,9 @@ export function createMainWindow(): BrowserWindow {
     minHeight: 640,
     show: false,
     frame: false,
-    titleBarStyle: 'hidden',
+    // macOS keeps its native traffic lights inset into our custom title bar
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    trafficLightPosition: process.platform === 'darwin' ? { x: 14, y: 13 } : undefined,
     backgroundColor: '#0b0b10',
     autoHideMenuBar: true,
     webPreferences: {

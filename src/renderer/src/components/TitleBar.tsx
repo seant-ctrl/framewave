@@ -6,6 +6,8 @@ import { fw } from '@/lib/fw'
 import { cn } from '@/lib/utils'
 import { recorder } from '@/recorder/recorder'
 
+const isMac = fw.platform === 'darwin'
+
 export function TitleBar(): React.JSX.Element {
   const route = useApp((s) => s.route)
   const navigate = useApp((s) => s.navigate)
@@ -22,7 +24,7 @@ export function TitleBar(): React.JSX.Element {
 
   return (
     <div className="drag h-10 flex items-center justify-between select-none shrink-0 border-b border-line" style={{ background: 'linear-gradient(180deg,#12131c,#0f1017)' }}>
-      <div className="flex items-center gap-1 pl-3 h-full">
+      <div className={cn('flex items-center gap-1 h-full', isMac ? 'pl-[88px]' : 'pl-3')}>
         <div className="flex items-center gap-2 pr-3 mr-1 border-r border-line h-5">
           <Logo />
           <span className="text-[12.5px] font-semibold tracking-tight">Framewave</span>
@@ -54,6 +56,7 @@ export function TitleBar(): React.JSX.Element {
           />
           <NavBtn icon={<Settings size={14} />} label="Settings" active={route.name === 'settings'} onClick={() => navigate({ name: 'settings' })} />
         </div>
+        {!isMac && (
         <div className="no-drag flex h-full">
           <WinBtn onClick={() => fw.window.minimize()} label="Minimize">
             <Minus size={14} />
@@ -65,6 +68,7 @@ export function TitleBar(): React.JSX.Element {
             <X size={15} />
           </WinBtn>
         </div>
+        )}
       </div>
     </div>
   )
