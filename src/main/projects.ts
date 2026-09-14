@@ -358,6 +358,7 @@ export async function importVideo(filePath: string, onProgress?: (label: string,
 // ── Montage: multiple media sources ─────────────────────────────────────────
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'])
+const AUDIO_EXT = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.oga', '.opus', '.flac', '.wma', '.aiff', '.aif'])
 
 /** Normalize a media file (video or image) into the project dir and return its asset. */
 export async function ingestMedia(id: string, filePath: string, onProgress?: (label: string, p: number) => void): Promise<MediaAsset> {
@@ -381,6 +382,18 @@ export async function ingestMedia(id: string, filePath: string, onProgress?: (la
     return { id: assetId, kind: 'image', name: basename(filePath), file: out, width, height, durationMs: 4000, hasAudio: false }
   }
   const info = await ffmpeg.probe(filePath)
+  if (AUDIO_EXT.has(ext) || (!info.hasVideo && info.hasAudio)) {
+    // Audio-only asset → keep web-playable formats, transcode the rest to AAC
+    let out: string
+    if (['.mp3', '.m4a', '.wav', '.ogg', '.opus', '.flac'].includes(ext) && ext !== '.aiff') {
+      out = `${assetId}-${base}${ext}`
+      await fs.copyFile(filePath, join(dir, out))
+    } else {
+      out = `${assetId}-${base}.m4a`
+      await ffmpeg.run(['-i', filePath, '-vn', '-c:a', 'aac', '-b:a', '192k', join(dir, out)], { durationMs: info.durationMs, onProgress: (p) => onProgress?.(`Importing ${basename(filePath)}`, p.progress) })
+    }
+    return { id: assetId, kind: 'audio', name: basename(filePath), file: out, durationMs: info.durationMs, hasAudio: true, codec: info.audioCodec }
+  }
   if (!info.hasVideo) throw new Error(`${basename(filePath)} has no video stream`)
   const isMp4 = ['.mp4', '.m4v', '.mov'].includes(ext)
   let out: string

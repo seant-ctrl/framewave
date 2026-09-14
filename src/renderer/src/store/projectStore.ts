@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Project, RecordingEvents, RenderSettings, Timeline, ZoomSegment, TextOverlay, CameraSegment, CaptionSegment } from '@shared/types'
+import type { Project, RecordingEvents, RenderSettings, Timeline, ZoomSegment, TextOverlay, CameraSegment, CaptionSegment, AudioClip } from '@shared/types'
 import { fw } from '@/lib/fw'
 import { deepClone, debounce, uid } from '@/lib/utils'
 import { timelineDuration, clampSegments } from '@/engine/timeline'
@@ -11,6 +11,7 @@ export type Selection =
   | { kind: 'camera'; id: string }
   | { kind: 'text'; id: string }
   | { kind: 'caption'; id: string }
+  | { kind: 'audioClip'; id: string }
   | { kind: 'range'; start: number; end: number }
 
 interface Snapshot {
@@ -54,6 +55,9 @@ interface ProjectState {
   addCameraSegment(s: Omit<CameraSegment, 'id'>): string
   updateCameraSegment(id: string, patch: Partial<CameraSegment>, history?: boolean): void
   removeCameraSegment(id: string): void
+  addAudioClip(a: Omit<AudioClip, 'id'>): string
+  updateAudioClip(id: string, patch: Partial<AudioClip>, history?: boolean): void
+  removeAudioClip(id: string): void
   setCaptions(c: CaptionSegment[]): void
   updateCaption(id: string, patch: Partial<CaptionSegment>): void
   removeCaption(id: string): void
@@ -184,7 +188,7 @@ export const useProject = create<ProjectState>((set, get) => {
     setSelection(selection) {
       set({ selection })
       // auto-focus the matching panel
-      if (selection.kind === 'clip') set({ activePanel: 'clip' })
+      if (selection.kind === 'clip' || selection.kind === 'audioClip') set({ activePanel: 'clip' })
       if (selection.kind === 'zoom') set({ activePanel: 'zoom' })
       if (selection.kind === 'text') set({ activePanel: 'text' })
       if (selection.kind === 'camera') set({ activePanel: 'camera' })
@@ -257,6 +261,19 @@ export const useProject = create<ProjectState>((set, get) => {
     removeCameraSegment(id) {
       get().updateTimeline((t) => ({ ...t, camera: t.camera.filter((x) => x.id !== id) }))
       if (get().selection.kind === 'camera') set({ selection: { kind: 'none' } })
+    },
+
+    addAudioClip(a) {
+      const id = uid('audio')
+      get().updateTimeline((t) => ({ ...t, audioClips: [...(t.audioClips ?? []), { ...a, id }] }))
+      return id
+    },
+    updateAudioClip(id, patch, history = true) {
+      get().updateTimeline((t) => ({ ...t, audioClips: (t.audioClips ?? []).map((x) => (x.id === id ? { ...x, ...patch } : x)) }), { history })
+    },
+    removeAudioClip(id) {
+      get().updateTimeline((t) => ({ ...t, audioClips: (t.audioClips ?? []).filter((x) => x.id !== id) }))
+      if (get().selection.kind === 'audioClip') set({ selection: { kind: 'none' } })
     },
 
     setCaptions(captions) {

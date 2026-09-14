@@ -124,6 +124,7 @@ export function Editor({ projectId }: { projectId: string }): React.JSX.Element 
       if (r.mic && !p.peaks?.mic) want.push(['mic', r.mic.file])
       if (r.system && !p.peaks?.system) want.push(['system', r.system.file])
       if (r.screen?.hasAudio && !p.peaks?.screen) want.push(['screen', r.screen.file])
+      for (const m of r.media ?? []) if (m.id && m.hasAudio && !p.peaks?.[m.id]) want.push([m.id, m.file])
       for (const [name, file] of want) {
         const peaks = await computePeaks(projectMediaUrl(p.dir, file), 3000)
         if (peaks) mutate((np) => (np.peaks = { ...(np.peaks ?? {}), [name]: peaks }), { history: false })
@@ -165,6 +166,9 @@ export function Editor({ projectId }: { projectId: string }): React.JSX.Element 
         break
       case 'caption':
         removeCaption(selection.id)
+        break
+      case 'audioClip':
+        useProject.getState().removeAudioClip(selection.id)
         break
       case 'range':
         updateTimeline((t) => deleteRange(t, selection.start, selection.end))

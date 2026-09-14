@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Volume2, VolumeX, Video, ZoomIn, Camera, Type, Subtitles, Music, Mic, Speaker, Flag, FilePlus, Image as ImageIcon } from 'lucide-react'
+import { Volume2, VolumeX, Video, ZoomIn, Camera, Type, Subtitles, Music, Mic, Speaker, Flag, FilePlus, Image as ImageIcon, AudioLines } from 'lucide-react'
 import type { EditorContext } from './Editor'
 import { useProject, type Selection } from '@/store/projectStore'
 import { usePlayer } from '@/store/playerStore'
-import { placeClips, timelineDuration, snapPoints, trimClip, splitAt, removeClip, setClipSpeed, moveClip, assetFor, updateClip, type ClipPlacement } from '@/engine/timeline'
+import { placeClips, timelineDuration, snapPoints, trimClip, splitAt, removeClip, setClipSpeed, moveClip, assetFor, updateClip, detachAudio, reattachAudio, audioClipEnd, type ClipPlacement } from '@/engine/timeline'
 import { addMediaToProject } from './mediaImport'
 import { TRANSITIONS } from './panels/ClipPanel'
 import { cn, formatTime, clamp, uid } from '@/lib/utils'
-import type { ZoomSegment, CameraSegment, TextOverlay, CaptionSegment } from '@shared/types'
+import type { ZoomSegment, CameraSegment, TextOverlay, CaptionSegment, AudioClip } from '@shared/types'
 
 const HEADER_W = 128
 const RULER_H = 24
@@ -26,6 +26,8 @@ export function Timeline({ ctx, snapping }: { ctx: EditorContext; snapping: bool
   const addZoom = useProject((s) => s.addZoom)
   const addText = useProject((s) => s.addText)
   const addCameraSegment = useProject((s) => s.addCameraSegment)
+  const updateAudioClip = useProject((s) => s.updateAudioClip)
+  const removeAudioClip = useProject((s) => s.removeAudioClip)
   const mutate = useProject((s) => s.mutate)
 
   const time = usePlayer((s) => s.time)
@@ -332,6 +334,7 @@ export function Timeline({ ctx, snapping }: { ctx: EditorContext; snapping: bool
                     { label: 'Speed 1.5×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 1.5)) },
                     { label: 'Speed 2×', onClick: () => updateTimeline((t) => setClipSpeed(t, p.clip.id, 2)) }
                   ]),
+                  ...(asset?.hasAudio && !p.clip.muted ? [{ label: 'Detach audio', onClick: () => updateTimeline((t) => detachAudio(t, p.clip.id)) }] : []),
                   { label: p.clip.muted ? 'Unmute clip audio' : 'Mute clip audio', onClick: () => updateTimeline((t) => updateClip(t, p.clip.id, { muted: !p.clip.muted })) },
                   ...(places.length > 1 ? [{ label: 'Delete clip', danger: true, onClick: () => updateTimeline((t) => removeClip(t, p.clip.id)) }] : [])
                 ])
@@ -487,6 +490,106 @@ export function Timeline({ ctx, snapping }: { ctx: EditorContext; snapping: bool
       )
   })
 
+  // ── Audio track: free-positioned blocks (detached clip audio, imported sounds) ──
+  const audioClips = tl.audioClips ?? []
+  // Overlapping blocks stack into sub-lanes so none hides another
+  const audioLane = new Map<string, number>()
+  const laneEnds: number[] = []
+  for (const a of [...audioClips].sort((x, y) => x.start - y.start)) {
+    let lane = laneEnds.findIndex((end) => end <= a.start)
+    if (lane < 0) lane = laneEnds.push(0) - 1
+    laneEnds[lane] = audioClipEnd(a)
+    audioLane.set(a.id, lane)
+  }
+  const AUDIO_LANE_H = 42
+  const audioLanes = Math.max(1, laneEnds.length)
+  const assetOf = (sourceId: string) => assetFor(project, sourceId === 'screen' ? undefined : sourceId)
+  const peaksOf = (sourceId: string): number[] | undefined => project.peaks?.[sourceId]
+  const dragAudio = (e: React.PointerEvent, a: AudioClip, mode: 'move' | 'start' | 'end'): void => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const x0 = contentX(e.clientX)
+    const orig = { ...a }
+    const len = orig.sourceEnd - orig.sourceStart
+    const srcDur = assetOf(a.sourceId)?.durationMs ?? Infinity
+    let first = true
+    const move = (ev: PointerEvent): void => {
+      const dt = toT(contentX(ev.clientX) - x0)
+      let patch: Partial<AudioClip> = {}
+      if (mode === 'move') {
+        let s = Math.max(0, orig.start + dt)
+        const sn = snapT(s, [orig.start, orig.start + len])
+        const en = snapT(s + len, [orig.start, orig.start + len])
+        s = Math.abs(sn - s) <= Math.abs(en - (s + len)) ? sn : en - len
+        patch = { start: Math.max(0, s) }
+      } else if (mode === 'start') {
+        const ns = clamp(orig.sourceStart + dt, 0, orig.sourceEnd - 100)
+        patch = { sourceStart: ns, start: Math.max(0, orig.start + (ns - orig.sourceStart)) }
+      } else {
+        patch = { sourceEnd: clamp(orig.sourceEnd + dt, orig.sourceStart + 100, srcDur) }
+      }
+      updateAudioClip(a.id, patch, first)
+      first = false
+    }
+    const up = (): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+  trackRows.push({
+    key: 'audioclips',
+    icon: <AudioLines size={13} />,
+    label: 'Audio',
+    h: 4 + AUDIO_LANE_H * audioLanes,
+    right: (
+      <button className="text-fg-3 hover:text-fg" title="Add audio file" onClick={() => void addMediaToProject(project.id)}>
+        <FilePlus size={13} />
+      </button>
+    ),
+    body: (
+      <div className="absolute inset-0" onDoubleClick={() => void addMediaToProject(project.id)}>
+        {audioClips.map((a) => {
+          const sel = isSel('audioClip', a.id)
+          const asset = assetOf(a.sourceId)
+          const w = Math.max(6, toX(audioClipEnd(a)) - toX(a.start))
+          const label = a.name ?? asset?.name ?? (a.sourceId === 'screen' ? 'Recording audio' : a.sourceId)
+          return (
+            <div
+              key={a.id}
+              className={cn('absolute rounded-md overflow-hidden select-none cursor-grab active:cursor-grabbing', sel ? 'ring-2 ring-accent z-10' : 'ring-1 ring-white/10', a.muted && 'opacity-50')}
+              style={{ left: toX(a.start), width: w, top: 4 + (audioLane.get(a.id) ?? 0) * AUDIO_LANE_H, height: AUDIO_LANE_H - 4, background: 'linear-gradient(180deg,#1f3a3a,#183030)' }}
+              onPointerDown={(e) => {
+                setSelection({ kind: 'audioClip', id: a.id })
+                dragAudio(e, a, 'move')
+              }}
+              onDoubleClick={(e) => e.stopPropagation()}
+              onContextMenu={(e) =>
+                openMenu(e, [
+                  { label: a.muted ? 'Unmute' : 'Mute', onClick: () => updateAudioClip(a.id, { muted: !a.muted }) },
+                  ...(a.fromClipId ? [{ label: 'Re-attach to video clip', onClick: () => updateTimeline((t) => reattachAudio(t, a.id)) }] : []),
+                  { label: 'Delete', danger: true, onClick: () => removeAudioClip(a.id) }
+                ])
+              }
+            >
+              <ClipWave peaks={peaksOf(a.sourceId)} sourceStart={a.sourceStart} sourceEnd={a.sourceEnd} sourceDur={asset?.durationMs ?? a.sourceEnd} width={w} height={38} muted={a.muted} volume={a.volume} />
+              <div className="absolute left-2 top-0.5 right-2 text-[10.5px] font-medium truncate text-teal-100/90 flex items-center gap-1 pointer-events-none">
+                {a.muted && <VolumeX size={10} />}
+                <span className="truncate">{label}</span>
+                <span className="ml-auto font-mono text-[10px] text-fg-3">{formatTime(a.sourceEnd - a.sourceStart)}</span>
+              </div>
+              <div className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-accent/60" onPointerDown={(e) => dragAudio(e, a, 'start')} />
+              <div className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-accent/60" onPointerDown={(e) => dragAudio(e, a, 'end')} />
+            </div>
+          )
+        })}
+        {audioClips.length === 0 && <div className="absolute left-2 top-1/2 -translate-y-1/2 text-[10.5px] text-fg-3 pointer-events-none">Right-click a video clip → "Detach audio", or double-click to add an audio file</div>}
+      </div>
+    )
+  })
+
   const audioRow = (key: 'mic' | 'system' | 'music' | 'screen', icon: React.ReactNode, label: string, settings: { volume: number; muted: boolean }, toggle: () => void, peaks?: number[]): void => {
     trackRows.push({
       key,
@@ -607,6 +710,33 @@ export function Timeline({ ctx, snapping }: { ctx: EditorContext; snapping: bool
       )}
     </div>
   )
+}
+
+/** Waveform of one source range drawn into a block of `width` px. */
+function ClipWave({ peaks, sourceStart, sourceEnd, sourceDur, width, height, muted, volume }: { peaks?: number[]; sourceStart: number; sourceEnd: number; sourceDur: number; width: number; height: number; muted: boolean; volume: number }): React.JSX.Element {
+  const ref = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const c = ref.current
+    if (!c) return
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    c.width = Math.max(1, Math.ceil(width * dpr))
+    c.height = Math.ceil(height * dpr)
+    const g = c.getContext('2d')!
+    g.scale(dpr, dpr)
+    g.clearRect(0, 0, width, height)
+    if (!peaks || peaks.length === 0 || sourceDur <= 0) return
+    g.fillStyle = muted ? 'rgba(255,255,255,0.18)' : 'rgba(94,234,212,0.85)'
+    const n = Math.max(1, Math.floor(width))
+    const mid = height / 2 + 4
+    for (let i = 0; i < n; i++) {
+      const s = sourceStart + ((sourceEnd - sourceStart) * i) / n
+      const idx = Math.floor((s / sourceDur) * peaks.length)
+      const p = clamp((peaks[idx] ?? 0) * Math.min(1.5, volume), 0, 1)
+      const bh = Math.max(1, p * (height - 14))
+      g.fillRect(i, mid - bh / 2, 1, bh)
+    }
+  }, [peaks, sourceStart, sourceEnd, sourceDur, width, height, muted, volume])
+  return <canvas ref={ref} className="absolute inset-0" style={{ width, height }} />
 }
 
 function Waveform({ peaks, places, toX, width, muted, volume, basis, offset, musicDur, sourceDur }: { peaks?: number[]; places: ReturnType<typeof placeClips>; toX: (t: number) => number; width: number; muted: boolean; volume: number; basis: 'source' | 'timeline'; offset: number; musicDur?: number; sourceDur: number }): React.JSX.Element {

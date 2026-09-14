@@ -169,9 +169,10 @@ export function registerIpc(): void {
     return projects.importVideo(file, (label, p) => send('project:progress', { id: 'import', label, progress: p }))
   })
   const MEDIA_FILTERS = [
-    { name: 'Media', extensions: ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', 'png', 'jpg', 'jpeg', 'webp', 'bmp'] },
+    { name: 'Media', extensions: ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus'] },
     { name: 'Video', extensions: ['mp4', 'mov', 'webm', 'mkv', 'avi', 'm4v'] },
-    { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }
+    { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] },
+    { name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus'] }
   ]
   handle('project:createMontage', async (filePaths?: string[]) => {
     let files = filePaths

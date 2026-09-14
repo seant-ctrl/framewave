@@ -1,6 +1,6 @@
 import type { Project, Timeline, TransitionType } from '@shared/types'
 import { projectMediaUrl } from '@/lib/fw'
-import { activeClipsAt, clipAt, placeClips, sourceTimeOf, timelineDuration, timelineToSource, assetFor, type ClipPlacement } from './timeline'
+import { activeClipsAt, clipAt, placeClips, sourceTimeOf, timelineDuration, timelineToSource, assetFor, audioClipEnd, type ClipPlacement } from './timeline'
 import type { FrameSources, FrameSource } from './compositor'
 
 type TrackName = 'camera' | 'mic' | 'system' | 'music'
@@ -32,6 +32,8 @@ interface SourceEl {
 export class MediaPlayer {
   tracks = new Map<TrackName, Track>()
   sources = new Map<string, SourceEl>()
+  /** One media element per independent audio block */
+  audioEls = new Map<string, { el: HTMLMediaElement; gain: GainNode | null }>()
   private ctx: AudioContext | null = null
   private master: GainNode | null = null
   private timeline: Timeline
@@ -139,7 +141,33 @@ export class MediaPlayer {
     if (r.mic) mk('mic', r.mic.file, r.mic.offsetMs ?? 0, false)
     if (r.system) mk('system', r.system.file, r.system.offsetMs ?? 0, false)
     if (this.timeline.audio.music) mk('music', this.timeline.audio.music.file, this.timeline.audio.music.offset, false, 'timeline')
+    this.syncAudioClipEls()
     this.applyVolumes()
+  }
+
+  /** Create/remove media elements so they match timeline.audioClips. */
+  private syncAudioClipEls(): void {
+    const clips = this.timeline.audioClips ?? []
+    const ids = new Set(clips.map((a) => a.id))
+    for (const [id, a] of this.audioEls) {
+      if (!ids.has(id)) {
+        a.el.pause()
+        a.el.removeAttribute('src')
+        a.el.load()
+        this.audioEls.delete(id)
+      }
+    }
+    for (const a of clips) {
+      if (this.audioEls.has(a.id)) continue
+      const asset = assetFor(this.project, a.sourceId === 'screen' ? undefined : a.sourceId)
+      if (!asset) continue
+      const el = this.mkMedia(projectMediaUrl(this.project.dir, asset.file), false)
+      this.audioEls.set(a.id, { el, gain: this.connectGain(el) })
+    }
+  }
+
+  private audioClipMediaTime(a: { start: number; sourceStart: number }, t: number): number {
+    return (a.sourceStart + (t - a.start)) / 1000
   }
 
   update(project: Project): void {
@@ -193,6 +221,7 @@ export class MediaPlayer {
       const m = this.tracks.get('music')
       if (m && project.timeline.audio.music) m.offsetMs = project.timeline.audio.music.offset
     }
+    this.syncAudioClipEls()
     this.applyVolumes()
     // Re-seek if clip structure changed while paused
     if (!this._playing) this.seek(this._time)
@@ -211,6 +240,13 @@ export class MediaPlayer {
     setTrack('system', vol(a.system.volume, a.system.muted))
     setTrack('camera', 0)
     if (a.music) setTrack('music', vol(a.music.volume, a.music.muted))
+    for (const ac of this.timeline.audioClips ?? []) {
+      const e = this.audioEls.get(ac.id)
+      if (!e) continue
+      const v = vol(ac.volume, ac.muted)
+      if (e.gain) e.gain.gain.value = v
+      else e.el.volume = Math.min(1, v)
+    }
     this.applyClipVolumes()
   }
 
@@ -345,6 +381,23 @@ export class MediaPlayer {
     for (const [id, s] of this.sources) {
       if (s.kind === 'video' && !activeIds.has(id)) (s.el as HTMLVideoElement).pause()
     }
+    // Independent audio blocks
+    for (const ac of this.timeline.audioClips ?? []) {
+      const e = this.audioEls.get(ac.id)
+      if (!e) continue
+      if (t < ac.start || t >= audioClipEnd(ac)) {
+        e.el.pause()
+        continue
+      }
+      const mt = this.audioClipMediaTime(ac, t)
+      if (Math.abs(e.el.currentTime - mt) > 0.012 || !this._playing) {
+        try {
+          e.el.currentTime = Math.max(0, mt)
+        } catch {
+          /* not ready */
+        }
+      }
+    }
     this.applyClipVolumes()
     if (this._playing) {
       this.clock0 = performance.now()
@@ -370,6 +423,12 @@ export class MediaPlayer {
       }
       tr.el.play().catch(() => {})
     }
+    for (const ac of this.timeline.audioClips ?? []) {
+      const e = this.audioEls.get(ac.id)
+      if (!e) continue
+      if (this._time >= ac.start && this._time < audioClipEnd(ac)) e.el.play().catch(() => {})
+      else e.el.pause()
+    }
   }
 
   async play(): Promise<void> {
@@ -388,6 +447,7 @@ export class MediaPlayer {
     this._playing = false
     for (const [, tr] of this.tracks) tr.el.pause()
     for (const [, s] of this.sources) if (s.kind === 'video') (s.el as HTMLVideoElement).pause()
+    for (const [, e] of this.audioEls) e.el.pause()
   }
 
   /** Advance the clock. Call once per animation frame while playing. */
@@ -451,6 +511,21 @@ export class MediaPlayer {
         tr.el.currentTime = mt
       }
     }
+    // Independent audio blocks: start/stop at their bounds, correct drift
+    for (const ac of this.timeline.audioClips ?? []) {
+      const e = this.audioEls.get(ac.id)
+      if (!e) continue
+      const inside = t >= ac.start && t < audioClipEnd(ac)
+      if (!inside) {
+        if (!e.el.paused) e.el.pause()
+        continue
+      }
+      const mt = this.audioClipMediaTime(ac, t)
+      if (e.el.paused) {
+        e.el.currentTime = mt
+        e.el.play().catch(() => {})
+      } else if (Math.abs(e.el.currentTime - mt) > 0.09) e.el.currentTime = mt
+    }
     if (master && master.kind === 'video' && master.ready && (master.el as HTMLVideoElement).paused && this._playing) (master.el as HTMLVideoElement).play().catch(() => {})
     return this._time
   }
@@ -473,6 +548,11 @@ export class MediaPlayer {
         ;(s.el as HTMLVideoElement).load()
       } else (s.el as HTMLImageElement).src = ''
     }
+    for (const [, e] of this.audioEls) {
+      e.el.removeAttribute('src')
+      e.el.load()
+    }
+    this.audioEls.clear()
     this.tracks.clear()
     this.sources.clear()
     void this.ctx?.close()

@@ -1,7 +1,7 @@
 {
   "name": "framewave",
   "productName": "Framewave",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "A powerful screen recorder and video editor with auto-zoom, cursor effects, backgrounds, captions and studio-grade export.",
   "main": "./out/main/index.js",
   "author": "Sean",

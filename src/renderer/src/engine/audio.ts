@@ -253,6 +253,53 @@ export async function mixdown(
       input?.dispose?.()
     }
   }
+  // ── Independent audio blocks (detached audio, imported sounds) ──
+  for (const a of timeline.audioClips ?? []) {
+    const aEnd = a.start + (a.sourceEnd - a.sourceStart)
+    if (a.muted || a.volume <= 0 || aEnd <= range.start || a.start >= range.end) continue
+    const asset = assetFor(project, a.sourceId === 'screen' ? undefined : a.sourceId)
+    if (!asset) continue
+    let input: Input | null = null
+    try {
+      input = await openInput(projectMediaUrl(project.dir, asset.file))
+      const track = await input.getPrimaryAudioTrack()
+      if (!track || !(await track.canDecode())) continue
+      const trackDur = await track.computeDuration()
+      const sink = new AudioBufferSink(track)
+      const g = ctx.createGain()
+      g.connect(ctx.destination)
+      const startSec = (a.start - range.start) / 1000
+      const endSec = (aEnd - range.start) / 1000
+      const s0 = Math.max(0, startSec)
+      const e0 = Math.min(lengthSec, endSec)
+      g.gain.setValueAtTime(a.fadeIn > 0 && startSec >= 0 ? 0 : a.volume, s0)
+      if (a.fadeIn > 0) g.gain.linearRampToValueAtTime(a.volume, Math.min(e0, startSec + a.fadeIn / 1000))
+      if (a.fadeOut > 0 && endSec - a.fadeOut / 1000 > s0) {
+        g.gain.setValueAtTime(a.volume, endSec - a.fadeOut / 1000)
+        g.gain.linearRampToValueAtTime(0, Math.min(e0, endSec))
+      }
+      const tlA = Math.max(a.start, range.start)
+      const tlB = Math.min(aEnd, range.end)
+      const srcA = (a.sourceStart + (tlA - a.start)) / 1000
+      const srcB = (a.sourceStart + (tlB - a.start)) / 1000
+      if (srcB <= 0 || srcA >= trackDur) continue
+      for await (const { buffer, timestamp } of sink.buffers(Math.max(0, srcA), Math.min(trackDur, srcB))) {
+        const node = ctx.createBufferSource()
+        node.buffer = buffer
+        node.connect(g)
+        const when = (a.start - range.start) / 1000 + (timestamp - a.sourceStart / 1000)
+        if (when + buffer.duration <= 0) continue
+        if (when < 0) node.start(0, -when)
+        else node.start(when)
+        if (when + buffer.duration > e0) node.stop(Math.max(0, e0))
+        any = true
+      }
+    } catch (e) {
+      console.warn('[mixdown] audio clip failed', e)
+    } finally {
+      input?.dispose?.()
+    }
+  }
   onProgress?.(1)
   if (!any) return null
   return ctx.startRendering()

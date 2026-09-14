@@ -35,6 +35,7 @@ A powerful, local-first screen recorder and video editor for Windows — in the 
 - Reorder clips by dragging, trim, split, per-clip speed, volume and mute, fill/fit framing for mixed aspect ratios
 - Transitions between clips: cross fade, dip to black/white, slides, wipe, zoom, blur — with audio crossfade
 - Background music with loop and fade-out, exported together with each clip's own audio
+- Independent **Audio track**: detach a clip's sound into its own block (right-click → Detach audio), move/trim it freely, fade in/out, re-attach; import mp3/wav/m4a/flac files as blocks; overlapping blocks stack into lanes
 
 **Export**
 - MP4 (H.264 / H.265 / AV1), WebM (VP9, alpha-capable), GIF, PNG sequence, MP3

@@ -22,7 +22,8 @@ Electron (37) + electron-vite + React 19 + TypeScript + Tailwind v4 desktop app:
 
 ## Montage model
 - `Clip.sourceId` selects a `MediaAsset` from `recording.media` (undefined/'screen' = the recording). `Clip.transitionIn` overlaps the previous clip: `placeClips()` in `engine/timeline.ts` computes overlapping placements and `activeClipsAt()` returns current + outgoing clip with progress. Compositor draws transitions in `drawContent`; player keeps one element per source and crossfades gains; exporter uses a `SourcePool` (one sequential `FrameFeeder` per video source, bitmaps for images); mixdown schedules each clip's own audio with fades matching the overlaps.
-- Media ingestion (`projects.ts: ingestMedia`) normalizes everything to H.264 MP4 (or copies images). UI: `panels/ClipPanel.tsx`, drag-reorder + transition badges in `Timeline.tsx`, `mediaImport.ts` for add/drop.
+- Media ingestion (`projects.ts: ingestMedia`) normalizes everything to H.264 MP4 (or copies images).
+- Audio track: `Timeline.audioClips` (`AudioClip` = source range + timeline `start`, volume/fades/mute, `fromClipId` when detached). `detachAudio`/`reattachAudio` in `engine/timeline.ts` (detaching mutes the video clip); `timelineDuration` = max(video end, audio block ends). Player keeps one media element per block (`audioEls`), mixdown schedules blocks with fade ramps, peaks are keyed by asset id in `project.peaks`. Audio-only imports (`ingestMedia` copies mp3/m4a/wav/ogg/opus/flac, transcodes the rest to m4a) become blocks at the playhead, trimmed to the video end. UI: `panels/ClipPanel.tsx`, drag-reorder + transition badges in `Timeline.tsx`, `mediaImport.ts` for add/drop.
 
 ## Gotchas learned
 - Do not pass width/height constraints to `getDisplayMedia` — Chromium upscales the capture to the max.

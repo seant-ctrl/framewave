@@ -1,4 +1,4 @@
-import type { Clip, Timeline, Project, MediaAsset } from '@shared/types'
+import type { Clip, Timeline, Project, MediaAsset, AudioClip } from '@shared/types'
 import { uid } from '@/lib/utils'
 
 /** Duration of a clip on the timeline (accounting for speed). */
@@ -38,7 +38,57 @@ export function placeClips(tl: Timeline): ClipPlacement[] {
 
 export function timelineDuration(tl: Timeline): number {
   const p = placeClips(tl)
+  let end = p.length ? p[p.length - 1].end : 0
+  for (const a of tl.audioClips ?? []) end = Math.max(end, audioClipEnd(a))
+  return end
+}
+
+/** Video-only duration (last video clip end). */
+export function videoDuration(tl: Timeline): number {
+  const p = placeClips(tl)
   return p.length ? p[p.length - 1].end : 0
+}
+
+export function audioClipDuration(a: AudioClip): number {
+  return Math.max(0, a.sourceEnd - a.sourceStart)
+}
+export function audioClipEnd(a: AudioClip): number {
+  return a.start + audioClipDuration(a)
+}
+
+/** Detach a video clip's audio into an independent AudioClip (the clip itself is muted). */
+export function detachAudio(tl: Timeline, clipId: string): Timeline {
+  const p = placeClips(tl).find((x) => x.clip.id === clipId)
+  if (!p) return tl
+  const c = p.clip
+  const a: AudioClip = {
+    id: uid('audio'),
+    sourceId: c.sourceId ?? 'screen',
+    sourceStart: c.sourceStart,
+    sourceEnd: c.sourceEnd,
+    start: p.start,
+    volume: c.volume ?? 1,
+    muted: false,
+    fadeIn: 0,
+    fadeOut: 0,
+    fromClipId: c.id
+  }
+  return {
+    ...tl,
+    clips: tl.clips.map((x) => (x.id === clipId ? { ...x, muted: true } : x)),
+    audioClips: [...(tl.audioClips ?? []), a]
+  }
+}
+
+/** Reverse of detachAudio: remove the block and un-mute its video clip. */
+export function reattachAudio(tl: Timeline, audioClipId: string): Timeline {
+  const a = (tl.audioClips ?? []).find((x) => x.id === audioClipId)
+  if (!a) return tl
+  return {
+    ...tl,
+    clips: a.fromClipId ? tl.clips.map((x) => (x.id === a.fromClipId ? { ...x, muted: false } : x)) : tl.clips,
+    audioClips: (tl.audioClips ?? []).filter((x) => x.id !== audioClipId)
+  }
 }
 
 /** Find the clip that "owns" timeline time t (the incoming clip during a transition). */
@@ -99,9 +149,11 @@ export function sourceToTimeline(tl: Timeline, s: number, sourceId?: string): nu
   return null
 }
 
-/** Resolve the media asset a clip plays. */
+/** Resolve the media asset for a source id ('screen' / 'mic' / 'system' / media asset id). */
 export function assetFor(project: Project, sourceId: string | undefined): MediaAsset | undefined {
   if (!sourceId || sourceId === 'screen') return project.recording.screen
+  if (sourceId === 'mic') return project.recording.mic
+  if (sourceId === 'system') return project.recording.system
   return project.recording.media?.find((m) => m.id === sourceId)
 }
 
@@ -137,6 +189,9 @@ export function deleteRange(tl: Timeline, a: number, b: number): Timeline {
     camera: shiftSeg(t.camera),
     texts: shiftSeg(t.texts),
     captions: shiftSeg(t.captions),
+    audioClips: (t.audioClips ?? [])
+      .filter((x) => !(x.start >= a - 0.5 && audioClipEnd(x) <= b + 0.5))
+      .map((x) => ({ ...x, start: x.start >= b ? x.start - removed : x.start })),
     markers: t.markers.filter((m) => m.t < a || m.t >= b).map((m) => ({ ...m, t: shift(m.t) }))
   }
 }
@@ -229,6 +284,10 @@ export function snapPoints(tl: Timeline, extra: number[] = []): number[] {
   for (const z of tl.zooms) {
     pts.add(z.start)
     pts.add(z.end)
+  }
+  for (const a of tl.audioClips ?? []) {
+    pts.add(a.start)
+    pts.add(audioClipEnd(a))
   }
   for (const m of tl.markers) pts.add(m.t)
   return [...pts]

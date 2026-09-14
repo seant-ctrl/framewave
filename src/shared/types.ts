@@ -86,7 +86,7 @@ export interface RecordingEvents {
 export interface MediaAsset {
   /** Stable id used by clips (`sourceId`). The recording's screen asset has id 'screen'. */
   id?: string
-  kind?: 'video' | 'image'
+  kind?: 'video' | 'image' | 'audio'
   /** Display name (original file name) */
   name?: string
   file: string // file name inside the project directory
@@ -216,6 +216,24 @@ export interface CaptionSegment {
   text: string
 }
 
+/** A free-positioned block of audio on the Audio track (detached from a video clip, or an imported audio file). */
+export interface AudioClip {
+  id: string
+  /** 'screen' (the recording's own video), 'mic', 'system', or a MediaAsset id */
+  sourceId: string
+  sourceStart: number
+  sourceEnd: number
+  /** Timeline start */
+  start: number
+  volume: number
+  muted: boolean
+  fadeIn: number
+  fadeOut: number
+  name?: string
+  /** Set when created by "detach audio" from a video clip (allows re-attaching) */
+  fromClipId?: string
+}
+
 export interface AudioTrackSettings {
   volume: number // 0..2
   muted: boolean
@@ -240,6 +258,8 @@ export interface Timeline {
   camera: CameraSegment[]
   texts: TextOverlay[]
   captions: CaptionSegment[]
+  /** Independent audio blocks (detached clip audio, imported sounds/music) */
+  audioClips: AudioClip[]
   audio: {
     mic: AudioTrackSettings
     system: AudioTrackSettings
@@ -551,6 +571,7 @@ export const DEFAULT_TIMELINE = (durationMs: number): Timeline => ({
   camera: [],
   texts: [],
   captions: [],
+  audioClips: [],
   audio: {
     mic: { ...DEFAULT_AUDIO_TRACK },
     system: { ...DEFAULT_AUDIO_TRACK, volume: 0.8 },

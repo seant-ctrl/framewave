@@ -1,12 +1,12 @@
 import React, { useState } from 'react'
-import { Film, Image as ImageIcon, Trash2, Copy, ArrowLeft, ArrowRight, FilePlus, Scissors, Sparkles } from 'lucide-react'
+import { Film, Image as ImageIcon, Trash2, Copy, ArrowLeft, ArrowRight, FilePlus, Scissors, Sparkles, AudioLines, Unlink, Link } from 'lucide-react'
 import { useProject } from '@/store/projectStore'
 import { usePlayer } from '@/store/playerStore'
 import { useApp } from '@/store/appStore'
 import { Slider, Toggle, Segmented, Section, Row, Select, NumberField } from '../../ui/ui'
-import { placeClips, updateClip, moveClip, duplicateClip, removeClip, assetFor, splitAt, clipDuration } from '@/engine/timeline'
+import { placeClips, updateClip, moveClip, duplicateClip, removeClip, assetFor, splitAt, clipDuration, detachAudio, reattachAudio, timelineDuration as tlDuration } from '@/engine/timeline'
 import { formatTime, cn } from '@/lib/utils'
-import type { TransitionType, Clip } from '@shared/types'
+import type { TransitionType, Clip, AudioClip } from '@shared/types'
 import { addMediaToProject } from '../mediaImport'
 
 export const TRANSITIONS: Array<{ value: TransitionType; label: string }> = [
@@ -34,6 +34,7 @@ export function ClipPanel(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const places = placeClips(project.timeline)
   const sel = selection.kind === 'clip' ? places.find((p) => p.clip.id === selection.id) : null
+  const selAudio = selection.kind === 'audioClip' ? (project.timeline.audioClips ?? []).find((a) => a.id === selection.id) ?? null : null
 
   const addMedia = async (): Promise<void> => {
     setBusy(true)
@@ -81,7 +82,9 @@ export function ClipPanel(): React.JSX.Element {
         </div>
       </Section>
 
-      {sel ? (
+      {selAudio ? (
+        <SelectedAudioClip a={selAudio} />
+      ) : sel ? (
         <SelectedClip clip={sel.clip} index={sel.index} count={places.length} start={sel.start} end={sel.end} />
       ) : (
         <Section title="Transitions for all clips">
@@ -97,6 +100,51 @@ export function ClipPanel(): React.JSX.Element {
         </Section>
       )}
     </div>
+  )
+}
+
+function SelectedAudioClip({ a }: { a: AudioClip }): React.JSX.Element {
+  const project = useProject((s) => s.project!)
+  const updateAudioClip = useProject((s) => s.updateAudioClip)
+  const removeAudioClip = useProject((s) => s.removeAudioClip)
+  const updateTimeline = useProject((s) => s.updateTimeline)
+  const setSelection = useProject((s) => s.setSelection)
+  const asset = assetFor(project, a.sourceId === 'screen' ? undefined : a.sourceId)
+  const srcDur = asset?.durationMs ?? a.sourceEnd
+  const set = (patch: Partial<AudioClip>, history = true): void => updateAudioClip(a.id, patch, history)
+  return (
+    <>
+      <Section title="Audio block" right={<span className="text-[11px] text-fg-3 truncate max-w-[150px] flex items-center gap-1"><AudioLines size={11} /> {a.name ?? asset?.name ?? a.sourceId}</span>}>
+        <div className="text-[11.5px] text-fg-3">Drag the block on the Audio track to move it; drag its edges to trim.</div>
+        <Row label="Start">
+          <NumberField value={Math.round(a.start)} min={0} max={Math.max(0, tlDuration(project.timeline) + 60000)} step={100} suffix="ms" width={96} onChange={(v) => set({ start: v })} />
+        </Row>
+        <div className="grid grid-cols-2 gap-3">
+          <Row label="In">
+            <NumberField value={Math.round(a.sourceStart)} min={0} max={a.sourceEnd - 100} step={100} suffix="ms" width={92} onChange={(v) => set({ sourceStart: v })} />
+          </Row>
+          <Row label="Out">
+            <NumberField value={Math.round(a.sourceEnd)} min={a.sourceStart + 100} max={Math.max(a.sourceStart + 100, srcDur)} step={100} suffix="ms" width={92} onChange={(v) => set({ sourceEnd: v })} />
+          </Row>
+        </div>
+        <Slider label="Volume" value={a.volume} min={0} max={2} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => set({ volume: v }, false)} onCommit={(v) => set({ volume: v })} />
+        <div className="grid grid-cols-2 gap-3">
+          <Slider label="Fade in" value={a.fadeIn} min={0} max={5000} step={50} format={(v) => `${(v / 1000).toFixed(1)}s`} onChange={(v) => set({ fadeIn: v }, false)} onCommit={(v) => set({ fadeIn: v })} />
+          <Slider label="Fade out" value={a.fadeOut} min={0} max={5000} step={50} format={(v) => `${(v / 1000).toFixed(1)}s`} onChange={(v) => set({ fadeOut: v }, false)} onCommit={(v) => set({ fadeOut: v })} />
+        </div>
+        <Toggle label="Mute" checked={a.muted} onChange={(v) => set({ muted: v })} />
+        <div className="flex gap-2">
+          {a.fromClipId && (
+            <button className="btn flex-1" onClick={() => { updateTimeline((tl) => reattachAudio(tl, a.id)); setSelection({ kind: 'none' }) }}>
+              <Link size={13} /> Re-attach to video
+            </button>
+          )}
+          <button className="btn btn-danger" onClick={() => removeAudioClip(a.id)}>
+            <Trash2 size={13} /> Delete
+          </button>
+        </div>
+      </Section>
+    </>
   )
 }
 
@@ -127,6 +175,11 @@ function SelectedClip({ clip, index, count, start, end }: { clip: Clip; index: n
           <button className="btn btn-sm" disabled={time <= start + 50 || time >= end - 50} onClick={() => updateTimeline((tl) => splitAt(tl, time))}>
             <Scissors size={12} /> Split here
           </button>
+          {asset?.hasAudio && (
+            <button className="btn btn-sm col-span-2" disabled={!!clip.muted} title="Move this clip's sound to the Audio track so it can be trimmed and repositioned on its own" onClick={() => updateTimeline((tl) => detachAudio(tl, clip.id))}>
+              <Unlink size={12} /> {clip.muted ? 'Audio muted / detached' : 'Detach audio to its own track'}
+            </button>
+          )}
         </div>
         {isImage ? (
           <Row label="Duration">
