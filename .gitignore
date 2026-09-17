@@ -6,3 +6,4 @@ release
 .DS_Store
 src/renderer/public/ort/
 native/mac/build/
+*.tsbuildinfo
